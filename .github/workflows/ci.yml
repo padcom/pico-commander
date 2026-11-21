@@ -9,7 +9,8 @@ permissions:
   contents: read
 
 env:
-  PICO_VERSION: 0.5.1
+  # 0.6.0 is the first release with method overloading, which this package's API needs.
+  PICO_VERSION: 0.6.0
 
 jobs:
   ci:

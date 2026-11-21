@@ -5,7 +5,7 @@ subcommands and generated help for command-line programs. It follows commander 1
 it, and the same parsing, error messages, exit codes and help layout (checked against commander.js 14.0.3 on the same
 programs). It is plain Pico, with no native code, so it runs on every platform Pico does.
 
-It needs a Pico with method overloading (pico-lang's `feature/method-overloading` branch, not in a release yet).
+It needs Pico 0.6.0 or later (method overloading).
 
 ## Use
 
