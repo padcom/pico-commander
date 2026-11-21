@@ -141,7 +141,7 @@ export class Values {
   }
 
   /// The `index`th value (an action's arguments in their order), or null.
-  public at(index: int): Value? {
+  public get(index: int): Value? {
     if (index < 0 || index >= names.length) return null
     return get(names[index])
   }
@@ -149,6 +149,11 @@ export class Values {
   /// Whether `name` has a value.
   public has(name: string): bool {
     return get(name) != null
+  }
+
+  /// Whether the `index`th value is there.
+  public has(index: int): bool {
+    return get(index) != null
   }
 
   /// The names, in order.
@@ -166,52 +171,44 @@ export class Values {
     return truthy(get(name))
   }
 
+  public bool(index: int): bool {
+    return truthy(get(index))
+  }
+
   /// `name` as text: a string, or a number as text; null for a flag, a list or nothing.
   public string(name: string): string? {
-    const v = get(name)
-    if (v == null) return null
-    return match (v) {
-      Str(s) => s,
-      Int(n) => `${n}`,
-      Num(x) => `${x}`,
-      _ => null,
-    }
+    return asString(get(name))
+  }
+
+  public string(index: int): string? {
+    return asString(get(index))
   }
 
   /// `name` as a list: a variadic value, a single string as a list of one, else empty.
   public strings(name: string): string[] {
-    const v = get(name)
-    if (v == null) return []
-    return match (v) {
-      List(xs) => xs,
-      Str(s) => [s],
-      Int(n) => [`${n}`],
-      Num(x) => [`${x}`],
-      Bool(_) => [],
-    }
+    return asStrings(get(name))
+  }
+
+  public strings(index: int): string[] {
+    return asStrings(get(index))
   }
 
   /// `name` as an integer: an `Int`, or a string that is one; null otherwise.
   public int(name: string): int? {
-    const v = get(name)
-    if (v == null) return null
-    return match (v) {
-      Int(n) => n,
-      Str(s) => intFrom(s),
-      _ => null,
-    }
+    return asInt(get(name))
+  }
+
+  public int(index: int): int? {
+    return asInt(get(index))
   }
 
   /// `name` as a number: a `Num`, an `Int`, or a string that is one; null otherwise.
   public number(name: string): number? {
-    const v = get(name)
-    if (v == null) return null
-    return match (v) {
-      Num(x) => x,
-      Int(n) => n as number,
-      Str(s) => numberFrom(s),
-      _ => null,
-    }
+    return asNumber(get(name))
+  }
+
+  public number(index: int): number? {
+    return asNumber(get(index))
   }
 
   public toString(): string {
@@ -221,5 +218,45 @@ export class Values {
       parts.push(`${n}: ${if (v == null) "null" else jsonValue(v)}`)
     }
     return "{ " + parts.join(", ") + " }"
+  }
+}
+
+function asString(v: Value?): string? {
+  if (v == null) return null
+  return match (v) {
+    Str(s) => s,
+    Int(n) => `${n}`,
+    Num(x) => `${x}`,
+    _ => null,
+  }
+}
+
+function asStrings(v: Value?): string[] {
+  if (v == null) return []
+  return match (v) {
+    List(xs) => xs,
+    Str(s) => [s],
+    Int(n) => [`${n}`],
+    Num(x) => [`${x}`],
+    Bool(_) => [],
+  }
+}
+
+function asInt(v: Value?): int? {
+  if (v == null) return null
+  return match (v) {
+    Int(n) => n,
+    Str(s) => intFrom(s),
+    _ => null,
+  }
+}
+
+function asNumber(v: Value?): number? {
+  if (v == null) return null
+  return match (v) {
+    Num(x) => x,
+    Int(n) => n as number,
+    Str(s) => numberFrom(s),
+    _ => null,
   }
 }

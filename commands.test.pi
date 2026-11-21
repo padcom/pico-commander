@@ -45,13 +45,13 @@ describe("arguments", () => {
     p.program.arguments("<cmd> [env]").action((a, _opts, _cmd) => { args = a })
     p.program.parse(["build", "prod"])
     expect(args.string("cmd") ?? "").toBe("build")
-    expect(args.at(1) is Value.Str("prod")).toBe(true)
+    expect(args.get(1) is Value.Str("prod")).toBe(true)
     expect(args.length).toBe(2)
   })
 
   it("defaults, parsers and choices", () => {
     const p = new Probe()
-    p.program.argument("[n]", "count", 1, parseInteger)
+    p.program.argument("[n]", "count", parseInteger, 1)
     p.program.addArgument(new Argument("[mode]").choices(["fast", "slow"]).default("fast"))
     p.program.parse([])
     expect(p.program.processedArgs.int("n") ?? 0).toBe(1)
@@ -86,7 +86,7 @@ describe("subcommands", () => {
     p.program.command("clone <source> [destination]").alias("cl")
       .option("--depth <n>")
       .action((args, opts, cmd) => {
-        seen = `${cmd.getName()} ${args} ${opts} ${cmd.optsWithGlobals()}`
+        seen = `${cmd.name()} ${args} ${opts} ${cmd.optsWithGlobals()}`
       })
     p.program.parse(["cl", "repo", "--depth", "1", "-g"])
     expect(seen).toBe("clone { source: \"repo\", destination: null } { depth: \"1\" } { depth: \"1\", global: true }")
@@ -95,7 +95,7 @@ describe("subcommands", () => {
   it("a default command runs without its name", () => {
     const p = new Probe()
     let ran = ""
-    p.program.command("serve", isDefault: true).option("-p <port>").action((_a, opts, _c) => { ran = opts.string("p") ?? "" })
+    p.program.command("serve", { isDefault: true }).option("-p <port>").action((_a, opts, _c) => { ran = opts.string("p") ?? "" })
     p.program.command("build").action((_a, _o, _c) => { ran = "build" })
     p.program.parse(["-p", "80"])
     expect(ran).toBe("80")
@@ -147,11 +147,11 @@ describe("subcommands", () => {
 describe("hooks", () => {
   it("run around the action, program hooks outermost", () => {
     const p = new Probe()
-    p.program.hook("preAction", (t, a) => { p.log.push(`pre ${t.getName()} ${a.getName()}`) })
-    p.program.hook("postAction", (t, a) => { p.log.push(`post ${t.getName()} ${a.getName()}`) })
-    p.program.hook("preSubcommand", (_t, a) => { p.log.push(`sub ${a.getName()}`) })
+    p.program.hook("preAction", (t, a) => { p.log.push(`pre ${t.name()} ${a.name()}`) })
+    p.program.hook("postAction", (t, a) => { p.log.push(`post ${t.name()} ${a.name()}`) })
+    p.program.hook("preSubcommand", (_t, a) => { p.log.push(`sub ${a.name()}`) })
     const sub = p.program.command("go")
-    sub.hook("preAction", (t, _a) => { p.log.push(`pre ${t.getName()}`) })
+    sub.hook("preAction", (t, _a) => { p.log.push(`pre ${t.name()}`) })
     sub.action((_a, _o, _c) => { p.log.push("action") })
     p.program.parse(["go"])
     expect(p.log).toEqual(["sub go", "pre test go", "pre go", "action", "post test go"])
@@ -185,5 +185,73 @@ describe("parseAsync", () => {
     const p = new Probe()
     p.program.actionAsync(slowAction).argument("<x>")
     expect(() => { p.program.parse(["a"]) }).toPanic("parseAsync")
+  })
+})
+
+describe("commander's overloaded methods", () => {
+  it("name, description, summary, usage, alias and version read back", () => {
+    const p = new Probe()
+    p.program.name("tool").description("does things").summary("things").usage("[opts] <x>").version("1.2.3")
+    const sub = p.program.command("run").alias("r").aliases(["go"])
+    expect(p.program.name()).toBe("tool")
+    expect(p.program.description()).toBe("does things")
+    expect(p.program.summary()).toBe("things")
+    expect(p.program.usage()).toBe("[opts] <x>")
+    expect(p.program.version() ?? "").toBe("1.2.3")
+    expect(sub.alias() ?? "").toBe("r")
+    expect(sub.aliases()).toEqual(["r", "go"])
+    expect(new Command().version() == null).toBe(true)
+  })
+
+  it("arguments and options take a parser before the default, as in commander", () => {
+    const p = new Probe()
+    p.program.argument("[n]", "count", parseInteger, 5).requiredOption("-p, --port <n>", "port", parseInteger, 80)
+    p.program.parse([])
+    expect(p.program.processedArgs.int(0) ?? 0).toBe(5)
+    expect(p.program.opts().int("port") ?? 0).toBe(80)
+    p.program.parse(["7", "-p", "8"])
+    expect(p.program.processedArgs.int("n") ?? 0).toBe(7)
+    expect(p.program.opts().int("port") ?? 0).toBe(8)
+  })
+
+  it("Values read by position too", () => {
+    const p = new Probe()
+    let args = new Values()
+    p.program.argument("<a>").argument("[b...]").action((a, _o, _c) => { args = a })
+    p.program.parse(["x", "y", "z"])
+    expect(args.string(0) ?? "").toBe("x")
+    expect(args.strings(1)).toEqual(["y", "z"])
+    expect(args.has(2)).toBe(false)
+  })
+
+  it("{ hidden: true } leaves a command out of the help, helpCommand(false) the help command", () => {
+    const p = new Probe()
+    p.program.name("t").helpCommand(false)
+    p.program.command("shown").action((_a, _o, _c) => {})
+    p.program.command("secret", { hidden: true }).action((_a, _o, _c) => {})
+    p.program.addCommand(new Command("extra"), { hidden: true })
+    const help = p.program.helpInformation()
+    expect(help).toContain("shown")
+    expect(help.includes("secret") || help.includes("extra") || help.includes("help [command]")).toBe(false)
+  })
+
+  it("help({ error: true }) writes to stderr and exits with 1", () => {
+    const p = new Probe()
+    p.program.name("t")
+    expect(p.fails(["--nope"])).toBe("commander.unknownOption")
+    const q = new Probe()
+    q.program.name("t").action((_a, _o, cmd) => { cmd.help({ error: true }) })
+    expect(q.fails([])).toBe("commander.help")
+    expect(q.err).toBe("Usage: t [options]\n\nOptions:\n  -h, --help  display help for command\n")
+    expect(q.out).toBe("")
+    q.program.outputHelp()
+    expect(q.out).toBe(q.err)
+  })
+
+  it("showHelpAfterError() shows the whole help", () => {
+    const p = new Probe()
+    p.program.name("t").showHelpAfterError()
+    expect(p.fails(["--nope"])).toBe("commander.unknownOption")
+    expect(p.err).toBe("error: unknown option '--nope'\n\nUsage: t [options]\n\nOptions:\n  -h, --help  display help for command\n")
   })
 })

@@ -139,9 +139,9 @@ AFTER
 `)
   })
 
-  it("helpOption(enabled: false) turns it off", () => {
+  it("helpOption(false) turns it off", () => {
     const p = new Probe()
-    p.program.name("x").helpOption(enabled: false).option("-h, --host <h>")
+    p.program.name("x").helpOption(false).option("-h, --host <h>")
     expect(p.program.helpInformation()).toBe("Usage: x [options]\n\nOptions:\n  -h, --host <h>\n")
   })
 
@@ -181,7 +181,7 @@ describe("version and errors", () => {
 
   it("error() reports like commander", () => {
     const p = new Probe()
-    p.program.action((_a, _o, cmd) => { cmd.error("error: bad things", 3, "my.code") })
+    p.program.action((_a, _o, cmd) => { cmd.error("error: bad things", { exitCode: 3, code: "my.code" }) })
     expect(p.run([])).toBe("3 my.code")
     expect(p.err).toBe("error: bad things\n")
   })

@@ -15,8 +15,8 @@ program
   .option("-c, --cheese [type]", "add cheese, with an optional type")
   .option("--no-sauce", "remove the sauce")
   .option("-t, --toppings <toppings...>", "any number of toppings")
-  .option("-n, --count <n>", "how many pizzas", 1, parseInteger)
-  .option("-v, --verbose", "say more (repeat for even more)", 0, increase)
+  .option("-n, --count <n>", "how many pizzas", parseInteger, 1)
+  .option("-v, --verbose", "say more (repeat for even more)", increase, 0)
   .addOption(new Option("-s, --size <size>", "the size").choices(["small", "medium", "large"]).default("medium"))
   .addOption(new Option("--delivery-time <minutes>", "when to deliver").env("PIZZA_DELIVERY").argParser(parseInteger))
   .action((_args, opts, _cmd) => {

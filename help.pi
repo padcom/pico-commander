@@ -39,7 +39,7 @@ export class Help {
     const out = cmd.commands.filter((c: Command) => !c.isHidden())
     const helpCommand = cmd.getHelpCommand()
     if (helpCommand != null && !helpCommand.isHidden()) out.push(helpCommand)
-    if (sortSubcommands) out.sort((a: Command, b: Command) => localeCompare(a.getName(), b.getName()))
+    if (sortSubcommands) out.sort((a: Command, b: Command) => localeCompare(a.name(), b.name()))
     return out
   }
 
@@ -95,8 +95,8 @@ export class Help {
   /// `name|alias [options] <args>`, as the list of subcommands shows a command.
   public virtual subcommandTerm(cmd: Command): string {
     const args = cmd.registeredArguments.map((a: Argument) => humanReadableArgName(a)).join(" ")
-    const aliases = cmd.getAliases()
-    return cmd.getName() + (if (aliases.length > 0) "|" + aliases[0] else "") +
+    const aliases = cmd.aliases()
+    return cmd.name() + (if (aliases.length > 0) "|" + aliases[0] else "") +
       (if (cmd.options.length > 0) " [options]" else "") + (if (args != "") " " + args else "")
   }
 
@@ -134,26 +134,26 @@ export class Help {
 
   /// `parent sub|alias [options] <args>`: the "Usage:" line.
   public virtual commandUsage(cmd: Command): string {
-    let cmdName = cmd.getName()
-    const aliases = cmd.getAliases()
+    let cmdName = cmd.name()
+    const aliases = cmd.aliases()
     if (aliases.length > 0) cmdName += "|" + aliases[0]
     let ancestorNames = ""
     let ancestor = cmd.parent
     while (ancestor != null) {
-      ancestorNames = ancestor.getName() + " " + ancestorNames
+      ancestorNames = ancestor.name() + " " + ancestorNames
       ancestor = ancestor.parent
     }
-    return ancestorNames + cmdName + " " + cmd.getUsage()
+    return ancestorNames + cmdName + " " + cmd.usage()
   }
 
   public virtual commandDescription(cmd: Command): string {
-    return cmd.getDescription()
+    return cmd.description()
   }
 
   /// What the list of subcommands says of one: its summary, else its description.
   public virtual subcommandDescription(cmd: Command): string {
-    const s = cmd.getSummary()
-    return if (s != "") s else cmd.getDescription()
+    const s = cmd.summary()
+    return if (s != "") s else cmd.description()
   }
 
   /// The option's description with its choices, default, preset and environment variable.

@@ -98,6 +98,24 @@ class HelpText {
   constructor(public position: string, public text: string) {}
 }
 
+/// How `command` and `addCommand` add a subcommand: `{ isDefault: true }` runs it when no
+/// subcommand is named, `{ hidden: true }` leaves it out of the help.
+export struct CommandOptions {
+  isDefault?: bool
+  hidden?: bool
+}
+
+/// The exit code and the code (`commander.…`) of an error reported with `Command.error`.
+export struct ErrorOptions {
+  exitCode?: int
+  code?: string
+}
+
+/// Whether help is written as for an error (to stderr, exit code 1): `help({ error: true })`.
+export struct HelpContext {
+  error?: bool
+}
+
 /// A parsed command line: the operands and what wasn't recognised (from the first unknown
 /// option on).
 export struct ParseOptionsResult {
@@ -156,7 +174,14 @@ export class Command {
 
   /// Adds a subcommand and returns it (not `this`): `command("clone <source> [dest]")`. It takes
   /// this command's settings as they are now.
-  public command(nameAndArgs: string, isDefault: bool = false, hidden: bool = false): Command {
+  public command(nameAndArgs: string): Command {
+    return command(nameAndArgs, {})
+  }
+
+  /// `command` with `{ isDefault, hidden }`.
+  public command(nameAndArgs: string, opts: CommandOptions): Command {
+    const isDefault = opts.isDefault ?? false
+    const hidden = opts.hidden ?? false
     const trimmed = nameAndArgs.trim()
     const space = trimmed.indexOf(" ")
     const name = if (space < 0) trimmed else trimmed.slice(0, space)
@@ -205,7 +230,14 @@ export class Command {
   }
 
   /// Adds a command made elsewhere (it keeps its own settings).
-  public addCommand(cmd: Command, isDefault: bool = false, hidden: bool = false): Command {
+  public addCommand(cmd: Command): Command {
+    return addCommand(cmd, {})
+  }
+
+  /// `addCommand` with `{ isDefault, hidden }`.
+  public addCommand(cmd: Command, opts: CommandOptions): Command {
+    const isDefault = opts.isDefault ?? false
+    const hidden = opts.hidden ?? false
     if (cmd.cmdName == "") panic("Command passed to .addCommand() must have a name\n- specify the name in Command constructor or using .name()")
     if (isDefault) defaultCommandName = cmd.cmdName
     if (hidden) cmd.hiddenCommand = true
@@ -220,11 +252,13 @@ export class Command {
   }
 
   /// Adds an argument: `<required>`, `[optional]`, `<rest...>`.
-  public argument(name: string, description: string = "", defaultValue: Default? = null, parser: Parser? = null): Command {
-    const arg = createArgument(name, description)
-    if (parser != null) arg.argParser(parser)
-    if (defaultValue != null) arg.default(defaultValue)
-    return addArgument(arg)
+  public argument(name: string, description: string = "", defaultValue: Default? = null): Command {
+    return addArgument(makeArgument(name, description, null, defaultValue))
+  }
+
+  /// `argument` with a parser for its text: `argument("<n>", "count", parseInteger, 1)`.
+  public argument(name: string, description: string, parser: Parser, defaultValue: Default? = null): Command {
+    return addArgument(makeArgument(name, description, parser, defaultValue))
   }
 
   /// Adds several arguments at once: `arguments("<cmd> [env]")`.
@@ -246,15 +280,19 @@ export class Command {
     return this
   }
 
-  /// The help command's name, arguments and description (`help [command]`); `enabled: false`
-  /// turns it off, `enabled: true` adds it even without subcommands.
-  public helpCommand(nameAndArgs: string = "help [command]", description: string = "display help for command", enabled: bool = true): Command {
+  /// Turns the help command off (`false`), or adds it even without subcommands (`true`).
+  public helpCommand(enabled: bool): Command {
     addImplicitHelpCommand = enabled
-    if (!enabled) return this
+    return this
+  }
+
+  /// The help command's name, arguments and description (`help [command]`).
+  public helpCommand(nameAndArgs: string, description: string = "display help for command"): Command {
+    addImplicitHelpCommand = true
     const trimmed = nameAndArgs.trim()
     const space = trimmed.indexOf(" ")
     const cmd = createCommand(if (space < 0) trimmed else trimmed.slice(0, space))
-    cmd.helpOption(enabled: false)
+    cmd.helpOption(false)
     if (space >= 0) cmd.arguments(trimmed.slice(space + 1))
     if (description != "") cmd.description(description)
     helpCommandValue = cmd
@@ -265,7 +303,10 @@ export class Command {
   public getHelpCommand(): Command? {
     const implicit = addImplicitHelpCommand ?? (commands.length > 0 && actionSync == null && actionAsync_ == null && findCommand("help") == null)
     if (!implicit) return null
-    if (helpCommandValue == null) helpCommand()
+    if (helpCommandValue == null) {
+      helpCommand("help [command]")
+      addImplicitHelpCommand = null
+    }
     return helpCommandValue
   }
 
@@ -284,9 +325,16 @@ export class Command {
     return this
   }
 
-  /// Throw `CommanderError` instead of exiting. With `fn`, it's called with the error; when it
-  /// returns, the process exits as it would have.
-  public exitOverride(fn: ExitCallback? = null): Command {
+  /// Throw `CommanderError` instead of exiting.
+  public exitOverride(): Command {
+    exitOverridden = true
+    exitCallback = null
+    return this
+  }
+
+  /// Calls `fn` with the `CommanderError` instead of exiting; when it returns, the process exits
+  /// as it would have.
+  public exitOverride(fn: ExitCallback): Command {
     exitOverridden = true
     exitCallback = fn
     return this
@@ -312,15 +360,27 @@ export class Command {
   }
 
   /// Adds an option: `-d, --debug`, `-p, --port <number>`, `-c, --cheese [type]`, `--no-sauce`,
-  /// `-n, --names <names...>`. A parser turns the text into the value (`parseInteger`,
-  /// `collect`, your own), and gets the value so far, starting with the default.
-  public option(flags: string, description: string = "", defaultValue: Default? = null, parser: Parser? = null): Command {
-    return addOption(makeOption(flags, description, defaultValue, parser))
+  /// `-n, --names <names...>`, with the value it has when it isn't given.
+  public option(flags: string, description: string = "", defaultValue: Default? = null): Command {
+    return addOption(makeOption(flags, description, null, defaultValue))
+  }
+
+  /// `option` with a parser, which turns the text into the value (`parseInteger`, `collect`,
+  /// your own) and gets the value so far, starting with the default.
+  public option(flags: string, description: string, parser: Parser, defaultValue: Default? = null): Command {
+    return addOption(makeOption(flags, description, parser, defaultValue))
   }
 
   /// `option` for an option that must be given (or have a default).
-  public requiredOption(flags: string, description: string = "", defaultValue: Default? = null, parser: Parser? = null): Command {
-    const o = makeOption(flags, description, defaultValue, parser)
+  public requiredOption(flags: string, description: string = "", defaultValue: Default? = null): Command {
+    const o = makeOption(flags, description, null, defaultValue)
+    o.makeOptionMandatory()
+    return addOption(o)
+  }
+
+  /// `requiredOption` with a parser.
+  public requiredOption(flags: string, description: string, parser: Parser, defaultValue: Default? = null): Command {
+    const o = makeOption(flags, description, parser, defaultValue)
     o.makeOptionMandatory()
     return addOption(o)
   }
@@ -350,14 +410,22 @@ export class Command {
     return this
   }
 
-  public getVersion(): string? {
+  /// The version, when it's set.
+  public version(): string? {
     return versionText
   }
 
-  /// The help option's flags and description; `enabled: false` turns it off.
-  public helpOption(flags: string = "-h, --help", description: string = "display help for command", enabled: bool = true): Command {
+  /// The help option's flags and description.
+  public helpOption(flags: string, description: string = "display help for command"): Command {
+    helpOptionDisabled = false
+    helpOptionValue = createOption(flags, description)
+    return this
+  }
+
+  /// Turns the help option off (`false`), or back on with its default flags (`true`).
+  public helpOption(enabled: bool): Command {
     helpOptionDisabled = !enabled
-    helpOptionValue = if (enabled) createOption(flags, description) else null
+    helpOptionValue = null
     return this
   }
 
@@ -384,7 +452,7 @@ export class Command {
     return this
   }
 
-  public getName(): string {
+  public name(): string {
     return cmdName
   }
 
@@ -393,7 +461,7 @@ export class Command {
     return this
   }
 
-  public getDescription(): string {
+  public description(): string {
     return descriptionText
   }
 
@@ -403,7 +471,7 @@ export class Command {
     return this
   }
 
-  public getSummary(): string {
+  public summary(): string {
     return summaryText
   }
 
@@ -424,8 +492,13 @@ export class Command {
     return this
   }
 
-  public getAliases(): string[] {
+  public aliases(): string[] {
     return aliasNames
+  }
+
+  /// The first alias, if there is one.
+  public alias(): string? {
+    return if (aliasNames.length > 0) aliasNames[0] else null
   }
 
   /// What the "Usage:" line shows after the command's name.
@@ -434,7 +507,7 @@ export class Command {
     return this
   }
 
-  public getUsage(): string {
+  public usage(): string {
     const u = usageText
     if (u != null) return u
     const parts: string[] = []
@@ -483,9 +556,16 @@ export class Command {
     return this
   }
 
-  /// Shows help (or `message`) after an error.
-  public showHelpAfterError(message: string? = null, enabled: bool = true): Command {
-    helpAfterError = enabled
+  /// Shows the help after an error (`false`: doesn't).
+  public showHelpAfterError(displayHelp: bool = true): Command {
+    helpAfterError = displayHelp
+    helpAfterErrorMessage = null
+    return this
+  }
+
+  /// Shows `message` after an error, such as "(add --help for additional information)".
+  public showHelpAfterError(message: string): Command {
+    helpAfterError = true
     helpAfterErrorMessage = message
     return this
   }
@@ -706,31 +786,67 @@ export class Command {
   // ---- help and errors ----
 
   /// The help text.
-  public helpInformation(error: bool = false): string {
+  public helpInformation(): string {
+    return helpText(false)
+  }
+
+  /// The help text, as for an error with `{ error: true }`.
+  public helpInformation(context: HelpContext): string {
+    return helpText(context.error ?? false)
+  }
+
+  private helpText(error: bool): string {
     const helper = createHelp()
     const getWidth = if (error) output.getErrHelpWidth else output.getOutHelpWidth
     return helper.formatHelp(this, getWidth())
   }
 
-  /// Writes the help (to stderr with `error`) and goes on.
-  public outputHelp(error: bool = false): void {
+  /// Writes the help and goes on.
+  public outputHelp(): void {
+    writeHelp(false)
+  }
+
+  /// Writes the help, to stderr with `{ error: true }`, and goes on.
+  public outputHelp(context: HelpContext): void {
+    writeHelp(context.error ?? false)
+  }
+
+  private writeHelp(error: bool): void {
     const write = if (error) output.writeErr else output.writeOut
     const chain = commandAndAncestors()
     for (let i = chain.length - 1; i >= 0; i--) chain[i].writeHelpTexts("beforeAll", write)
     writeHelpTexts("before", write)
-    write(helpInformation(error))
+    write(helpText(error))
     writeHelpTexts("after", write)
     for (const c of chain) c.writeHelpTexts("afterAll", write)
   }
 
-  /// Writes the help and exits (with 1 for `error`).
-  public help(error: bool = false): never throws Error {
-    outputHelp(error)
+  /// Writes the help and exits.
+  public help(): never throws Error {
+    showHelp(false)
+  }
+
+  /// Writes the help and exits, as for an error (stderr, exit code 1) with `{ error: true }`.
+  public help(context: HelpContext): never throws Error {
+    showHelp(context.error ?? false)
+  }
+
+  private showHelp(error: bool): never throws Error {
+    writeHelp(error)
     exitWith(if (error) 1 else 0, "commander.help", "(outputHelp)")
   }
 
-  /// Reports an error as commander's own are reported, and exits.
-  public error(message: string, exitCode: int = 1, code: string = "commander.error"): never throws Error {
+  /// Reports an error as commander's own are reported, and exits with 1.
+  public error(message: string): never throws Error {
+    fail(message, 1, "commander.error")
+  }
+
+  /// `error` with `{ exitCode, code }`.
+  public error(message: string, opts: ErrorOptions): never throws Error {
+    fail(message, opts.exitCode ?? 1, opts.code ?? "commander.error")
+  }
+
+  private fail(message: string, exitCode: int, code: string): never throws Error {
     const outputError = output.outputError
     const writeErr = output.writeErr
     outputError(`${message}\n`, writeErr)
@@ -740,7 +856,7 @@ export class Command {
         writeErr(`${m}\n`)
       } else {
         writeErr("\n")
-        outputHelp(true)
+        writeHelp(true)
       }
     }
     exitWith(exitCode, code, message)
@@ -817,7 +933,14 @@ export class Command {
     options.push(option)
   }
 
-  private makeOption(flags: string, description: string, defaultValue: Default?, parser: Parser?): Option {
+  private makeArgument(name: string, description: string, parser: Parser?, defaultValue: Default?): Argument {
+    const arg = createArgument(name, description)
+    if (parser != null) arg.argParser(parser)
+    if (defaultValue != null) arg.default(defaultValue)
+    return arg
+  }
+
+  private makeOption(flags: string, description: string, parser: Parser?, defaultValue: Default?): Option {
     const o = createOption(flags, description)
     if (parser != null) o.argParser(parser)
     if (defaultValue != null) o.default(defaultValue)
@@ -870,7 +993,7 @@ export class Command {
       value = try {
         parseArg("", old)
       } catch (e: InvalidArgumentError) {
-        error(`error: option '${option.flags}' is invalid. ${e.message}`, e.exitCode, e.code)
+        fail(`error: option '${option.flags}' is invalid. ${e.message}`, e.exitCode, e.code)
       }
     } else if (value != null) {
       const parser = option.parseArg
@@ -892,18 +1015,18 @@ export class Command {
   private callParseArg(parser: Parser?, choices: string[]?, value: Value, previous: Value?, invalidMessage: string): Value throws Error {
     const text = textValue(value)
     if (choices != null && !choices.includes(text)) {
-      error(`${invalidMessage} Allowed choices are ${choices.join(", ")}.`, 1, "commander.invalidArgument")
+      fail(`${invalidMessage} Allowed choices are ${choices.join(", ")}.`, 1, "commander.invalidArgument")
     }
     if (parser == null) return value
     return try {
       parser(text, previous)
     } catch (e: InvalidArgumentError) {
-      error(`${invalidMessage} ${e.message}`, e.exitCode, e.code)
+      fail(`${invalidMessage} ${e.message}`, e.exitCode, e.code)
     }
   }
 
   private optionMissingArgument(option: Option): never throws Error {
-    error(`error: option '${option.flags}' argument missing`, 1, "commander.optionMissingArgument")
+    fail(`error: option '${option.flags}' argument missing`, 1, "commander.optionMissingArgument")
   }
 
   private parseCommand(operandsBefore: string[], unknownBefore: string[], runner: Runner): void throws Error {
@@ -930,7 +1053,7 @@ export class Command {
       return
     }
     const hasAction = actionSync != null || actionAsync_ != null
-    if (commands.length > 0 && this.args.length == 0 && !hasAction) help(true)
+    if (commands.length > 0 && this.args.length == 0 && !hasAction) showHelp(true)
 
     outputHelpIfRequested(parsed.unknown)
     checkForMissingMandatoryOptions()
@@ -963,7 +1086,7 @@ export class Command {
       processArguments()
     } else if (commands.length > 0) {
       checkForUnknownOptions()
-      help(true)
+      showHelp(true)
     } else {
       checkForUnknownOptions()
       processArguments()
@@ -989,7 +1112,7 @@ export class Command {
   private dispatchSubcommand(name: string, operands: string[], unknown: string[], runner: Runner): void throws Error {
     const sub = findCommand(name)
     if (sub == null) {
-      help(true)
+      showHelp(true)
     }
     const chain = commandAndAncestors()
     for (let i = chain.length - 1; i >= 0; i--) chain[i].addHooks("preSubcommand", sub, runner)
@@ -1072,7 +1195,7 @@ export class Command {
     for (const c of commandAndAncestors()) {
       for (const o of c.options) {
         if (o.mandatory && c.getOptionValue(o.attributeName()) == null) {
-          c.error(`error: required option '${o.flags}' not specified`, 1, "commander.missingMandatoryOptionValue")
+          c.fail(`error: required option '${o.flags}' not specified`, 1, "commander.missingMandatoryOptionValue")
         }
       }
     }
@@ -1114,7 +1237,7 @@ export class Command {
       if (getOptionValueSource(key) == "env") return `environment variable '${best.envVar ?? ""}'`
       return `option '${best.flags}'`
     }
-    error(`error: ${describe(option)} cannot be used with ${describe(conflicting)}`, 1, "commander.conflictingOption")
+    fail(`error: ${describe(option)} cannot be used with ${describe(conflicting)}`, 1, "commander.conflictingOption")
   }
 
   private unknownOption(flag: string): void throws Error {
@@ -1132,7 +1255,7 @@ export class Command {
       }
       suggestion = suggestSimilar(flag, candidates)
     }
-    error(`error: unknown option '${flag}'${suggestion}`, 1, "commander.unknownOption")
+    fail(`error: unknown option '${flag}'${suggestion}`, 1, "commander.unknownOption")
   }
 
   private unknownCommand(): never throws Error {
@@ -1146,7 +1269,7 @@ export class Command {
       }
       suggestion = suggestSimilar(unknownName, candidates)
     }
-    error(`error: unknown command '${unknownName}'${suggestion}`, 1, "commander.unknownCommand")
+    fail(`error: unknown command '${unknownName}'${suggestion}`, 1, "commander.unknownCommand")
   }
 
   private processArguments(): void throws Error {
@@ -1154,7 +1277,7 @@ export class Command {
     for (let i = 0; i < registeredArguments.length; i++) {
       const a = registeredArguments[i]
       if (a.required && i >= given.length) {
-        error(`error: missing required argument '${a.name()}'`, 1, "commander.missingArgument")
+        fail(`error: missing required argument '${a.name()}'`, 1, "commander.missingArgument")
       }
     }
     if (!allowExcess && (registeredArguments.length == 0 || !registeredArguments[registeredArguments.length - 1].variadic) &&
@@ -1162,7 +1285,7 @@ export class Command {
       const expected = registeredArguments.length
       const s = if (expected == 1) "" else "s"
       const forSubcommand = if (parent != null) ` for '${cmdName}'` else ""
-      error(`error: too many arguments${forSubcommand}. Expected ${expected} argument${s} but got ${given.length}.`, 1, "commander.excessArguments")
+      fail(`error: too many arguments${forSubcommand}. Expected ${expected} argument${s} but got ${given.length}.`, 1, "commander.excessArguments")
     }
     const values = new Values()
     for (let i = 0; i < registeredArguments.length; i++) {

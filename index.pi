@@ -2,7 +2,8 @@
 // help, with the same API wherever the language allows it (README.md lists the differences).
 export { Argument, humanReadableArgName } from "./argument"
 export {
-  ActionHandler, AsyncActionHandler, AsyncHook, Command, ExitCallback, Hook, OutputConfiguration, ParseOptionsResult,
+  ActionHandler, AsyncActionHandler, AsyncHook, Command, CommandOptions, ErrorOptions, ExitCallback, HelpContext, Hook, OutputConfiguration,
+  ParseOptionsResult,
   createArgument, createCommand, createOption,
 } from "./command"
 export { CommanderError, InvalidArgumentError } from "./errors"

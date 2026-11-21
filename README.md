@@ -5,6 +5,8 @@ subcommands and generated help for command-line programs. It follows commander 1
 it, and the same parsing, error messages, exit codes and help layout (checked against commander.js 14.0.3 on the same
 programs). It is plain Pico, with no native code, so it runs on every platform Pico does.
 
+It needs a Pico with method overloading (pico-lang's `feature/method-overloading` branch, not in a release yet).
+
 ## Use
 
 ```ts
@@ -58,9 +60,9 @@ program
   .option("-c, --cheese [type]", "add cheese", "mozzarella")        // optional value, with a default
   .option("--no-sauce", "remove sauce")                             // `sauce` is true unless --no-sauce
   .option("-t, --toppings <items...>", "toppings")                  // every value up to the next option
-  .option("-n, --count <n>", "how many", 1, parseInteger)           // a parser, with a default
-  .option("-v, --verbose", "verbosity", 0, increase)                // -vvv is 3
-  .option("-I, --include <dir>", "include directory", parser: collect)  // repeatable
+  .option("-n, --count <n>", "how many", parseInteger, 1)           // a parser, with a default
+  .option("-v, --verbose", "verbosity", increase, 0)                // -vvv is 3
+  .option("-I, --include <dir>", "include directory", collect)      // repeatable
   .requiredOption("-o, --out <file>", "where to write")             // must be given
   .addOption(new Option("-s, --size <size>").choices(["small", "medium", "large"]).default("medium"))
   .addOption(new Option("--port <n>").env("PORT").argParser(parseInteger))
@@ -77,7 +79,7 @@ Short flags combine (`-abc`, `-n5`), long options take `--name=value`, `--` ends
 
 Commander keeps whatever JavaScript value a parser returns; Pico is statically typed, so a value is a `Value`:
 `Bool`, `Str`, `Int`, `Num` or `List` (of strings). `opts()` and the arguments an action gets are `Values`, which read
-them back by name:
+them back by name, or by position (an action's arguments: `args.string(0)`):
 
 | | |
 |---|---|
@@ -85,7 +87,7 @@ them back by name:
 | `string(name)` | a string (or a number as text); `null` for a flag without a value, a list or nothing |
 | `strings(name)` | a list; a single string is a list of one; nothing is `[]` |
 | `int(name)`, `number(name)` | an `Int`/`Num`, or a string that is one; else `null` |
-| `get(name)`, `at(i)`, `has(name)`, `keys()`, `length` | the `Value?` itself, by name or position |
+| `get(name)`, `has(name)`, `keys()`, `length` | the `Value?` itself |
 
 Defaults, presets and implied values can be given as `bool`, `string`, `int`, `number` or a `Value`
 (`Value.List(["a"])`). A parser is `(value: string, previous: Value?) => Value throws Error`; throw
@@ -104,14 +106,14 @@ The package's parsers: `parseInteger`, `parseNumber`, `collect` (a repeated opti
 program.command("clone <source> [destination]")
   .description("clone a repository")
   .alias("cl")
-  .option("--depth <n>", "history depth", parser: parseInteger)
+  .option("--depth <n>", "history depth", parseInteger)
   .action((args, opts, cmd) => {
     println(`${args.string("source")} → ${args.string("destination") ?? "."}`)
     println(`${cmd.optsWithGlobals()}`)                  // this command's options and its parents'
   })
 
-program.command("serve", isDefault: true)                // runs when no subcommand is named
-program.command("debug", hidden: true)                   // not in the help
+program.command("serve", { isDefault: true })            // runs when no subcommand is named
+program.command("debug", { hidden: true })               // not in the help
 program.addCommand(new Command("build").argument("<files...>"))
 program.addArgument(new Argument("[mode]", "how").choices(["fast", "slow"]).default("fast"))
 ```
@@ -135,12 +137,13 @@ validates the whole command line and then runs them in order, each awaited.
 
 ## Help, version, errors and output
 
-`version(v, flags?, description?)`, `helpOption(flags, description)` (`helpOption(enabled: false)` turns it off),
-`helpCommand(nameAndArgs, description)` (`enabled: false`, or `true` to add it without subcommands),
+`version(v, flags?, description?)`, `helpOption(flags, description)` (`helpOption(false)` turns it off),
+`helpCommand(nameAndArgs, description)` (`helpCommand(false)`, or `true` to add it without subcommands),
 `addHelpText("beforeAll" | "before" | "after" | "afterAll", text)`, `usage(text)`, `summary(text)`,
-`showHelpAfterError(message?)`, `showSuggestionAfterError(false)`, `configureHelp({ helpWidth, sortOptions,
-sortSubcommands, showGlobalOptions })`, `help(error?)`, `outputHelp(error?)`, `helpInformation()`, and
-`error(message, exitCode, code)` for errors of your own.
+`showHelpAfterError()` or `showHelpAfterError(message)`, `showSuggestionAfterError(false)`, `configureHelp({ helpWidth,
+sortOptions, sortSubcommands, showGlobalOptions })`, `help()`, `outputHelp()`, `helpInformation()` (each also with
+`{ error: true }`), and `error(message)` or `error(message, { exitCode, code })` for errors of your own. `name()`,
+`description()`, `summary()`, `usage()`, `alias()`, `aliases()` and `version()` without an argument read the value back.
 
 By default errors and help-on-error go to stderr and end the program (exit code 1; 0 for `--help` and `--version`).
 `exitOverride()` throws a `CommanderError` (with commander's `code`, such as `commander.unknownOption`, and the
@@ -156,21 +159,14 @@ program.exitOverride().configureOutput({ writeErr: (s: string) => { err += s } }
 
 ## Differences from commander.js
 
-Most come from Pico not having method overloads, `any` or `undefined`:
+Most come from Pico being statically typed, with no `any` or `undefined`:
 
-- **Getters are separate methods**: `name("x")` sets and `getName()` reads; likewise `getDescription()`, `getSummary()`,
-  `getUsage()`, `getAliases()`, `getVersion()`.
 - **Values are typed**: see [Values](#values). Options are read with `opts().string("x")` and friends, not as
   properties (there is no `storeOptionsAsProperties`).
 - **The action gets `(args, opts, cmd)`**: the arguments as one `Values`, not spread.
-- **A parser is a named argument**: `.option(flags, description, defaultValue, parser)`, or
-  `.option(flags, description, parser: fn)`; commander's `(flags, description, fn, default)` order doesn't fit
-  without overloads.
-- **Async uses its own methods**: `actionAsync`, `hookAsync` (Pico has no async lambdas yet, so they take named
-  `async function`s). With `parseAsync`, hooks and actions run after the whole command line is checked, so a
-  `preSubcommand` hook can't change how the subcommand is parsed.
-- **Booleans instead of `false`**: `helpOption(enabled: false)`, `helpCommand(enabled: false)`,
-  `showHelpAfterError(message?, enabled?)`; `command(name, isDefault, hidden)` instead of an options object.
+- **Async uses its own methods**: `actionAsync`, `hookAsync`. Pico has no async lambdas yet, so they take named
+  `async function`s, and a lambda can't tell a sync overload from an async one. With `parseAsync`, hooks and actions run
+  after the whole command line is checked, so a `preSubcommand` hook can't change how the subcommand is parsed.
 - **Mistakes in the program panic**: duplicate flags, a variadic argument that isn't last, an unknown hook event.
   Commander throws a plain `Error` for these.
 - **Help width** defaults to 80 (Pico can't ask the terminal for its width yet); set it with `configureHelp` or

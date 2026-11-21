@@ -146,7 +146,7 @@ describe("options with values", () => {
 describe("parsers and choices", () => {
   it("parseInteger gives an Int, and rejects other text", () => {
     const p = new Probe()
-    p.program.option("-p, --port <n>", "port", parser: parseInteger)
+    p.program.option("-p, --port <n>", "port", parseInteger)
     p.program.parse(["-p", "8080"])
     expect(p.program.opts().int("port") ?? 0).toBe(8080)
     expect(p.fails(["-p", "80x"])).toBe("commander.invalidArgument")
@@ -155,21 +155,21 @@ describe("parsers and choices", () => {
 
   it("increase counts -vvv", () => {
     const p = new Probe()
-    p.program.option("-v, --verbose", "verbosity", 0, increase)
+    p.program.option("-v, --verbose", "verbosity", increase, 0)
     p.program.parse(["-vvv"])
     expect(p.program.opts().int("verbose") ?? 0).toBe(3)
   })
 
   it("collect gathers a repeated option", () => {
     const p = new Probe()
-    p.program.option("-I, --include <dir>", "", parser: collect)
+    p.program.option("-I, --include <dir>", "", collect)
     p.program.parse(["-I", "a", "--include", "b", "-Ic"])
     expect(p.program.opts().strings("include")).toEqual(["a", "b", "c"])
   })
 
   it("a custom parser's InvalidArgumentError becomes the error message", () => {
     const p = new Probe()
-    p.program.option("--even <n>", "", parser: (v, _prev) => {
+    p.program.option("--even <n>", "", (v, _prev) => {
       const n = parseInteger(v, null)
       if (n is Value.Int(x) && x % 2 == 0) return n
       throw new InvalidArgumentError("Not even.")
@@ -180,7 +180,7 @@ describe("parsers and choices", () => {
 
   it("other errors from a parser go through", () => {
     const p = new Probe()
-    p.program.option("--x <n>", "", parser: (_v, _prev) => { throw new Error("boom") })
+    p.program.option("--x <n>", "", (_v, _prev) => { throw new Error("boom") })
     expect(p.fails(["--x", "1"])).toBe("other: boom")
   })
 
