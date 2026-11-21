@@ -1,0 +1,33 @@
+// Options of every kind, after commander's pizza examples.
+//
+//   pico run examples/pizza.pi -- --help
+//   pico run examples/pizza.pi -- -p hawaiian -c blue -vv --size large
+//   pico run examples/pizza.pi -- --no-sauce -t olives ham -n 2
+import { Command, Option, increase, parseInteger } from "../index"
+
+const program = new Command()
+
+program
+  .name("pizza")
+  .description("Order a pizza")
+  .version("1.0.0")
+  .option("-p, --pizza-type <type>", "flavour of pizza", "margherita")
+  .option("-c, --cheese [type]", "add cheese, with an optional type")
+  .option("--no-sauce", "remove the sauce")
+  .option("-t, --toppings <toppings...>", "any number of toppings")
+  .option("-n, --count <n>", "how many pizzas", 1, parseInteger)
+  .option("-v, --verbose", "say more (repeat for even more)", 0, increase)
+  .addOption(new Option("-s, --size <size>", "the size").choices(["small", "medium", "large"]).default("medium"))
+  .addOption(new Option("--delivery-time <minutes>", "when to deliver").env("PIZZA_DELIVERY").argParser(parseInteger))
+  .action((_args, opts, _cmd) => {
+    const n = opts.int("count") ?? 1
+    println(`${n} ${opts.string("size") ?? ""} ${opts.string("pizzaType") ?? ""} pizza${if (n == 1) "" else "s"}`)
+    if (!opts.bool("sauce")) println("  without sauce")
+    if (opts.has("cheese")) println(`  with ${opts.string("cheese") ?? "plain"} cheese`)
+    for (const t of opts.strings("toppings")) println(`  + ${t}`)
+    const minutes = opts.int("deliveryTime")
+    if (minutes != null) println(`  delivered in ${minutes} minutes`)
+    if ((opts.int("verbose") ?? 0) > 0) println(`options: ${opts}`)
+  })
+
+program.parse()

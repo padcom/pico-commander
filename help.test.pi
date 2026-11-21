@@ -1,0 +1,213 @@
+// Help, version and the help command. The expected texts are what commander.js 14 prints for
+// the same program.
+import { describe, it, expect } from "std/test"
+import { Argument, Command, CommanderError, Help, Option } from "./index"
+import { editDistance, suggestSimilar } from "./suggest"
+
+class Probe {
+  public out: string = ""
+  public err: string = ""
+  public program: Command = new Command()
+
+  constructor() {
+    program.exitOverride().configureOutput({
+      writeOut: (s: string) => { out += s },
+      writeErr: (s: string) => { err += s },
+    })
+  }
+
+  public run(argv: string[]): string {
+    try {
+      program.parse(argv)
+    } catch (e: CommanderError) {
+      return `${e.exitCode} ${e.code}`
+    } catch (e) {
+      return `other: ${e.message}`
+    }
+    return ""
+  }
+}
+
+function stringUtil(): Probe {
+  const p = new Probe()
+  p.program.name("string-util").description("CLI to some JavaScript string utilities").version("0.8.0")
+  p.program.command("split")
+    .description("Split a string into substrings and display as an array")
+    .argument("<string>", "string to split")
+    .option("--first", "display just the first substring")
+    .option("-s, --separator <char>", "separator character", ",")
+    .action((_a, _o, _c) => {})
+  return p
+}
+
+const programHelp = `Usage: string-util [options] [command]
+
+CLI to some JavaScript string utilities
+
+Options:
+  -V, --version             output the version number
+  -h, --help                display help for command
+
+Commands:
+  split [options] <string>  Split a string into substrings and display as an
+                            array
+  help [command]            display help for command
+`
+
+const splitHelp = `Usage: string-util split [options] <string>
+
+Split a string into substrings and display as an array
+
+Arguments:
+  string                  string to split
+
+Options:
+  --first                 display just the first substring
+  -s, --separator <char>  separator character (default: ",")
+  -h, --help              display help for command
+`
+
+describe("help", () => {
+  it("--help shows the program's", () => {
+    const p = stringUtil()
+    expect(p.run(["--help"])).toBe("0 commander.helpDisplayed")
+    expect(p.out).toBe(programHelp)
+  })
+
+  it("a subcommand's -h and `help <command>` show the subcommand's", () => {
+    const p = stringUtil()
+    expect(p.run(["split", "-h"])).toBe("0 commander.helpDisplayed")
+    expect(p.out).toBe(splitHelp)
+    const q = stringUtil()
+    expect(q.run(["help", "split"])).toBe("0 commander.help")
+    expect(q.out).toBe(splitHelp)
+  })
+
+  it("no command shows the help on stderr", () => {
+    const p = stringUtil()
+    expect(p.run([])).toBe("1 commander.help")
+    expect(p.err).toBe(programHelp)
+  })
+
+  it("shows defaults, choices, presets and env", () => {
+    const p = new Probe()
+    p.program.name("pizza")
+      .option("-c, --cheese [type]", "add cheese", "mozzarella")
+      .option("-n, --count <n>", "how many", 1)
+      .addOption(new Option("--size <size>", "drink size").choices(["small", "large"]))
+      .addOption(new Option("--port <n>", "port").env("PORT").default(80, "eighty"))
+      .addOption(new Option("--level [l]", "level").preset("high"))
+      .addOption(new Option("--secret").hideHelp())
+      .addArgument(new Argument("[mode]", "the mode").choices(["a", "b"]).default("a"))
+    expect(p.program.helpInformation()).toBe(`Usage: pizza [options] [mode]
+
+Arguments:
+  mode                 the mode (choices: "a", "b", default: "a")
+
+Options:
+  -c, --cheese [type]  add cheese (default: "mozzarella")
+  -n, --count <n>      how many (default: 1)
+  --size <size>        drink size (choices: "small", "large")
+  --port <n>           port (default: eighty, env: PORT)
+  --level [l]          level (preset: "high")
+  -h, --help           display help for command
+`)
+  })
+
+  it("help texts, a custom help option and help command, sorting", () => {
+    const p = new Probe()
+    p.program.name("tool").helpOption("-H, --HELP", "show the help").helpCommand("assist [cmd]", "get assistance")
+      .configureHelp({ sortOptions: true, sortSubcommands: true })
+      .addHelpText("before", "BEFORE").addHelpText("after", "AFTER")
+      .option("-z").option("-a")
+    p.program.command("zeta").description("last").alias("z")
+    p.program.command("alpha").description("first")
+    expect(p.run(["-H"])).toBe("0 commander.helpDisplayed")
+    expect(p.out).toBe(`BEFORE
+Usage: tool [options] [command]
+
+Options:
+  -a
+  -H, --HELP    show the help
+  -z
+
+Commands:
+  alpha         first
+  assist [cmd]  get assistance
+  zeta|z        last
+AFTER
+`)
+  })
+
+  it("helpOption(enabled: false) turns it off", () => {
+    const p = new Probe()
+    p.program.name("x").helpOption(enabled: false).option("-h, --host <h>")
+    expect(p.program.helpInformation()).toBe("Usage: x [options]\n\nOptions:\n  -h, --host <h>\n")
+  })
+
+  it("wraps descriptions and keeps preformatted ones", () => {
+    const p = new Probe()
+    p.program.name("w").description("An application for pizza ordering, with a description long enough that it has to be wrapped over several lines of help.")
+      .configureHelp({ helpWidth: 80 })
+    const lines = p.program.helpInformation().split("\n")
+    expect(lines[2]).toBe("An application for pizza ordering, with a description long enough that it has to")
+    const h = new Help()
+    expect(h.boxWrap("aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm nnn ooo", 40)).toBe("aaa bbb ccc ddd eee fff ggg hhh iii jjj\nkkk lll mmm nnn ooo")
+    expect(h.preformatted("one\n  two")).toBe(true)
+  })
+
+  it("showHelpAfterError adds a message", () => {
+    const p = new Probe()
+    p.program.name("x").showHelpAfterError("(add --help for additional information)")
+    expect(p.run(["--nope"])).toBe("1 commander.unknownOption")
+    expect(p.err).toBe("error: unknown option '--nope'\n(add --help for additional information)\n")
+  })
+})
+
+describe("version and errors", () => {
+  it("-V writes the version", () => {
+    const p = new Probe()
+    p.program.version("1.2.3")
+    expect(p.run(["-V"])).toBe("0 commander.version")
+    expect(p.out).toBe("1.2.3\n")
+  })
+
+  it("a custom version option", () => {
+    const p = new Probe()
+    p.program.version("2.0", "-v, --vers", "the version")
+    expect(p.run(["--vers"])).toBe("0 commander.version")
+    expect(p.program.helpInformation()).toContain("-v, --vers  the version")
+  })
+
+  it("error() reports like commander", () => {
+    const p = new Probe()
+    p.program.action((_a, _o, cmd) => { cmd.error("error: bad things", 3, "my.code") })
+    expect(p.run([])).toBe("3 my.code")
+    expect(p.err).toBe("error: bad things\n")
+  })
+
+  it("an exit callback sees the error", () => {
+    const p = new Probe()
+    let seen = ""
+    p.program.exitOverride((e: CommanderError) => {
+      seen = e.code
+      throw e
+    })
+    p.program.version("1")
+    p.run(["-V"])
+    expect(seen).toBe("commander.version")
+  })
+})
+
+describe("suggestions", () => {
+  it("edit distance counts a transposition as one", () => {
+    expect(editDistance("kitten", "sitting")).toBe(3)
+    expect(editDistance("ab", "ba")).toBe(1)
+  })
+
+  it("suggests the closest candidates", () => {
+    expect(suggestSimilar("--verbos", ["--verbose", "--version"])).toBe("\n(Did you mean --verbose?)")
+    expect(suggestSimilar("tst", ["test", "tset", "xyz"])).toBe("\n(Did you mean one of test, tset?)")
+    expect(suggestSimilar("zzz", ["test"])).toBe("")
+  })
+})

@@ -1,0 +1,5 @@
+// The program's command, as commander's `program`.
+import { Command } from "./command"
+
+/// A ready-made top-level command, for programs that need only one.
+export const program = new Command()

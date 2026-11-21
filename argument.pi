@@ -1,0 +1,75 @@
+// Argument: a command's positional argument, `<file>`, `[dest]` or `<files...>`.
+
+import { Default, Parser, Value, toValue } from "./value"
+
+/// A positional argument of a command. `Command.argument` makes one; `new Argument` with
+/// `Command.addArgument` gives the rest (choices, a parser, a default).
+export class Argument {
+  public description: string
+  public variadic: bool = false
+  public required: bool
+  public defaultValue: Value? = null
+  public defaultValueDescription: string? = null
+  public parseArg: Parser? = null
+  public argChoices: string[]? = null
+  private argName: string
+
+  /// `name` is `<required>`, `[optional]` or a bare name (required), with `...` at the end for
+  /// every remaining argument.
+  constructor(name: string, description: string = "") {
+    this.description = description
+    let n = name
+    let req = true
+    if (n.startsWith("<") && n.endsWith(">")) {
+      n = n.slice(1, n.length - 1)
+    } else if (n.startsWith("[") && n.endsWith("]")) {
+      req = false
+      n = n.slice(1, n.length - 1)
+    }
+    if (n.length > 3 && n.endsWith("...")) {
+      this.variadic = true
+      n = n.slice(0, n.length - 3)
+    }
+    this.required = req
+    this.argName = n
+  }
+
+  public name(): string {
+    return argName
+  }
+
+  /// The value when the argument isn't given (only for optional arguments).
+  public default(value: Default, description: string? = null): Argument {
+    defaultValue = toValue(value)
+    defaultValueDescription = description
+    return this
+  }
+
+  /// A function that turns the text given into the argument's value.
+  public argParser(fn: Parser): Argument {
+    parseArg = fn
+    return this
+  }
+
+  /// The only values the argument accepts.
+  public choices(values: string[]): Argument {
+    argChoices = values.slice(0)
+    return this
+  }
+
+  public argRequired(): Argument {
+    required = true
+    return this
+  }
+
+  public argOptional(): Argument {
+    required = false
+    return this
+  }
+}
+
+/// `<name>`, `[name]` or `<name...>`, as usage and help show the argument.
+export function humanReadableArgName(arg: Argument): string {
+  const n = arg.name() + (if (arg.variadic) "..." else "")
+  return if (arg.required) `<${n}>` else `[${n}]`
+}

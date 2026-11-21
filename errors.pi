@@ -1,0 +1,24 @@
+// The errors commander throws: CommanderError when the program would exit (only with
+// exitOverride), InvalidArgumentError from an argument parser.
+
+/// What ends a parse: an error in the command line, help or the version that was shown.
+/// `code` is commander's (`commander.unknownOption`, `commander.helpDisplayed`, …) and
+/// `exitCode` what the process would have exited with.
+export class CommanderError extends Error {
+  public code: string
+  public exitCode: int
+
+  constructor(exitCode: int, code: string, message: string) {
+    super(message)
+    this.code = code
+    this.exitCode = exitCode
+  }
+}
+
+/// Thrown by an option or argument parser for a value it doesn't accept; the message is
+/// added to commander's own ("error: option '-p <n>' argument 'x' is invalid. Not a number.").
+export class InvalidArgumentError extends CommanderError {
+  constructor(message: string) {
+    super(1, "commander.invalidArgument", message)
+  }
+}

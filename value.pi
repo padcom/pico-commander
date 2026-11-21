@@ -1,0 +1,225 @@
+// Option and argument values. Commander keeps whatever JavaScript value a parser returns;
+// here a value is one of a few kinds, and `Values` reads them back by name.
+
+import { InvalidArgumentError } from "./errors"
+
+/// The value of an option or an argument.
+export enum Value {
+  Bool(value: bool),
+  Str(value: string),
+  Int(value: int),
+  Num(value: number),
+  List(items: string[]),
+}
+
+/// What a default, a preset or an implied value can be given as.
+export type Default = bool | string | int | number | Value
+
+/// Turns a value an API takes into a `Value`.
+export function toValue(d: Default): Value {
+  return match (d) {
+    b: bool => Value.Bool(b),
+    s: string => Value.Str(s),
+    n: int => Value.Int(n),
+    x: number => Value.Num(x),
+    v: Value => v,
+  }
+}
+
+/// A custom parser (commander's `argParser`): the text given and the value so far (the
+/// default, or what an earlier occurrence gave). Throw `InvalidArgumentError` to reject it.
+export type Parser = (value: string, previous: Value?) => Value throws Error
+
+/// The value as JSON, as commander's help shows defaults: `"text"`, `true`, `3`, `["a","b"]`.
+export function jsonValue(v: Value): string {
+  return match (v) {
+    Bool(b) => `${b}`,
+    Str(s) => JSON.stringify(s),
+    Int(n) => `${n}`,
+    Num(x) => `${x}`,
+    List(xs) => "[" + xs.map((x: string) => JSON.stringify(x)).join(",") + "]",
+  }
+}
+
+/// Whether `a` and `b` are the same kind of value with the same contents.
+export function sameValue(a: Value, b: Value): bool {
+  return jsonValue(a) == jsonValue(b)
+}
+
+/// The value as text: a string as it is, a list joined with `,`.
+export function textValue(v: Value): string {
+  return match (v) {
+    Bool(b) => `${b}`,
+    Str(s) => s,
+    Int(n) => `${n}`,
+    Num(x) => `${x}`,
+    List(xs) => xs.join(","),
+  }
+}
+
+/// Whether the value counts as set, as in a JavaScript `if`: `false`, `""` and `0` don't.
+export function truthy(v: Value?): bool {
+  if (v == null) return false
+  return match (v) {
+    Bool(b) => b,
+    Str(s) => s != "",
+    Int(n) => n != 0,
+    Num(x) => x != 0.0,
+    List(_) => true,
+  }
+}
+
+/// `text` as an integer (decimal, an optional sign), or null.
+export function intFrom(text: string): int? {
+  const t = text.trim()
+  let i = 0
+  let negative = false
+  if (t.startsWith("-") || t.startsWith("+")) {
+    negative = t.startsWith("-")
+    i = 1
+  }
+  if (i >= t.length || t.length - i > 18) return null
+  let n = 0
+  while (i < t.length) {
+    const c = t[i]
+    if (c < '0' || c > '9') return null
+    n = n * 10 + "0123456789".indexOf(c.toString())
+    i++
+  }
+  return if (negative) -n else n
+}
+
+/// `text` as a number (JSON's syntax, plus a leading `+`), or null.
+export function numberFrom(text: string): number? {
+  let t = text.trim()
+  if (t.startsWith("+")) t = t.slice(1)
+  if (t == "") return null
+  return try? JSON.parse<number>(t)
+}
+
+/// A parser for integer options and arguments: `.option("-p, --port <n>", "port", parser: parseInteger)`.
+export function parseInteger(value: string, _previous: Value?): Value throws Error {
+  const n = intFrom(value)
+  if (n == null) throw new InvalidArgumentError("Not an integer.")
+  return Value.Int(n)
+}
+
+/// A parser for number options and arguments (`1.5`, `-2`, `1e3`).
+export function parseNumber(value: string, _previous: Value?): Value throws Error {
+  const x = numberFrom(value)
+  if (x == null) throw new InvalidArgumentError("Not a number.")
+  return Value.Num(x)
+}
+
+/// A parser that collects every occurrence of a repeatable option into a list.
+export function collect(value: string, previous: Value?): Value throws Error {
+  if (previous is Value.List(items)) return Value.List([...items, value])
+  return Value.List([value])
+}
+
+/// A parser that counts how often a flag is given (`-vvv` is 3); give it `defaultValue: 0`.
+export function increase(_value: string, previous: Value?): Value throws Error {
+  if (previous is Value.Int(n)) return Value.Int(n + 1)
+  return Value.Int(1)
+}
+
+/// Values by name, in the order they were set: what `opts()` gives and the arguments an action
+/// receives.
+export class Values {
+  private names: string[] = []
+  private values: Map<string, Value?> = new Map<string, Value?>()
+
+  /// Sets `name` (it keeps its place if it was already set).
+  public set(name: string, value: Value?): void {
+    if (!values.has(name)) names.push(name)
+    values.set(name, value)
+  }
+
+  /// The value of `name`, or null when it has none.
+  public get(name: string): Value? {
+    return values.get(name) ?? null
+  }
+
+  /// The `index`th value (an action's arguments in their order), or null.
+  public at(index: int): Value? {
+    if (index < 0 || index >= names.length) return null
+    return get(names[index])
+  }
+
+  /// Whether `name` has a value.
+  public has(name: string): bool {
+    return get(name) != null
+  }
+
+  /// The names, in order.
+  public keys(): string[] {
+    return names.slice(0)
+  }
+
+  /// How many names there are.
+  public get length(): int {
+    return names.length
+  }
+
+  /// Whether `name` is set and truthy (a flag that was given, a non-empty string, …).
+  public bool(name: string): bool {
+    return truthy(get(name))
+  }
+
+  /// `name` as text: a string, or a number as text; null for a flag, a list or nothing.
+  public string(name: string): string? {
+    const v = get(name)
+    if (v == null) return null
+    return match (v) {
+      Str(s) => s,
+      Int(n) => `${n}`,
+      Num(x) => `${x}`,
+      _ => null,
+    }
+  }
+
+  /// `name` as a list: a variadic value, a single string as a list of one, else empty.
+  public strings(name: string): string[] {
+    const v = get(name)
+    if (v == null) return []
+    return match (v) {
+      List(xs) => xs,
+      Str(s) => [s],
+      Int(n) => [`${n}`],
+      Num(x) => [`${x}`],
+      Bool(_) => [],
+    }
+  }
+
+  /// `name` as an integer: an `Int`, or a string that is one; null otherwise.
+  public int(name: string): int? {
+    const v = get(name)
+    if (v == null) return null
+    return match (v) {
+      Int(n) => n,
+      Str(s) => intFrom(s),
+      _ => null,
+    }
+  }
+
+  /// `name` as a number: a `Num`, an `Int`, or a string that is one; null otherwise.
+  public number(name: string): number? {
+    const v = get(name)
+    if (v == null) return null
+    return match (v) {
+      Num(x) => x,
+      Int(n) => n as number,
+      Str(s) => numberFrom(s),
+      _ => null,
+    }
+  }
+
+  public toString(): string {
+    const parts: string[] = []
+    for (const n of names) {
+      const v = get(n)
+      parts.push(`${n}: ${if (v == null) "null" else jsonValue(v)}`)
+    }
+    return "{ " + parts.join(", ") + " }"
+  }
+}

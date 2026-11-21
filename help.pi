@@ -1,0 +1,296 @@
+// Help: how commander lays out a command's help. Its methods are virtual, so a subclass can
+// change a part (`Command.configureHelp` sets the simple settings).
+
+import { Argument, humanReadableArgName } from "./argument"
+import { Command } from "./command"
+import { Option } from "./option"
+import { imax, localeCompare } from "./util"
+import { Value, jsonValue } from "./value"
+
+/// The settings `Command.configureHelp` takes.
+export struct HelpConfiguration {
+  /// The width help wraps to (default: the output's, 80).
+  helpWidth?: int
+  sortSubcommands?: bool
+  sortOptions?: bool
+  /// Also lists the options of the parent commands, under "Global Options:".
+  showGlobalOptions?: bool
+}
+
+export class Help {
+  public helpWidth: int? = null
+  public sortSubcommands: bool = false
+  public sortOptions: bool = false
+  public showGlobalOptions: bool = false
+  /// Descriptions narrower than this aren't wrapped.
+  public minWidthToWrap: int = 40
+
+  constructor(config: HelpConfiguration? = null) {
+    if (config != null) {
+      this.helpWidth = config.helpWidth
+      this.sortSubcommands = config.sortSubcommands ?? false
+      this.sortOptions = config.sortOptions ?? false
+      this.showGlobalOptions = config.showGlobalOptions ?? false
+    }
+  }
+
+  /// The subcommands help lists, with the help command.
+  public virtual visibleCommands(cmd: Command): Command[] {
+    const out = cmd.commands.filter((c: Command) => !c.isHidden())
+    const helpCommand = cmd.getHelpCommand()
+    if (helpCommand != null && !helpCommand.isHidden()) out.push(helpCommand)
+    if (sortSubcommands) out.sort((a: Command, b: Command) => localeCompare(a.getName(), b.getName()))
+    return out
+  }
+
+  /// Orders options by their short flag, else their long one (without dashes).
+  public virtual compareOptions(a: Option, b: Option): int {
+    return localeCompare(sortKey(a), sortKey(b))
+  }
+
+  /// The options help lists, with the help option unless another option took its flags.
+  public virtual visibleOptions(cmd: Command): Option[] {
+    const out = cmd.options.filter((o: Option) => !o.hidden)
+    const helpOption = cmd.getHelpOption()
+    if (helpOption != null && !helpOption.hidden) {
+      const hs = helpOption.short
+      const hl = helpOption.long
+      const removeShort = hs != null && cmd.findOption(hs) != null
+      const removeLong = hl != null && cmd.findOption(hl) != null
+      if (!removeShort && !removeLong) {
+        out.push(helpOption)
+      } else if (hl != null && !removeLong) {
+        out.push(new Option(hl, helpOption.description))
+      } else if (hs != null && !removeShort) {
+        out.push(new Option(hs, helpOption.description))
+      }
+    }
+    if (sortOptions) out.sort((a: Option, b: Option) => compareOptions(a, b))
+    return out
+  }
+
+  /// The options of the parent commands, when `showGlobalOptions` is on.
+  public virtual visibleGlobalOptions(cmd: Command): Option[] {
+    const out: Option[] = []
+    if (!showGlobalOptions) return out
+    let ancestor = cmd.parent
+    while (ancestor != null) {
+      for (const o of ancestor.options) {
+        if (!o.hidden) out.push(o)
+      }
+      ancestor = ancestor.parent
+    }
+    if (sortOptions) out.sort((a: Option, b: Option) => compareOptions(a, b))
+    return out
+  }
+
+  /// The arguments help lists: all of them when one has a description, else none.
+  public virtual visibleArguments(cmd: Command): Argument[] {
+    for (const a of cmd.registeredArguments) {
+      if (a.description != "") return cmd.registeredArguments
+    }
+    return []
+  }
+
+  /// `name|alias [options] <args>`, as the list of subcommands shows a command.
+  public virtual subcommandTerm(cmd: Command): string {
+    const args = cmd.registeredArguments.map((a: Argument) => humanReadableArgName(a)).join(" ")
+    const aliases = cmd.getAliases()
+    return cmd.getName() + (if (aliases.length > 0) "|" + aliases[0] else "") +
+      (if (cmd.options.length > 0) " [options]" else "") + (if (args != "") " " + args else "")
+  }
+
+  public virtual optionTerm(option: Option): string {
+    return option.flags
+  }
+
+  public virtual argumentTerm(argument: Argument): string {
+    return argument.name()
+  }
+
+  public virtual longestSubcommandTermLength(cmd: Command): int {
+    let n = 0
+    for (const c of visibleCommands(cmd)) n = imax(n, subcommandTerm(c).length)
+    return n
+  }
+
+  public virtual longestOptionTermLength(cmd: Command): int {
+    let n = 0
+    for (const o of visibleOptions(cmd)) n = imax(n, optionTerm(o).length)
+    return n
+  }
+
+  public virtual longestGlobalOptionTermLength(cmd: Command): int {
+    let n = 0
+    for (const o of visibleGlobalOptions(cmd)) n = imax(n, optionTerm(o).length)
+    return n
+  }
+
+  public virtual longestArgumentTermLength(cmd: Command): int {
+    let n = 0
+    for (const a of visibleArguments(cmd)) n = imax(n, argumentTerm(a).length)
+    return n
+  }
+
+  /// `parent sub|alias [options] <args>`: the "Usage:" line.
+  public virtual commandUsage(cmd: Command): string {
+    let cmdName = cmd.getName()
+    const aliases = cmd.getAliases()
+    if (aliases.length > 0) cmdName += "|" + aliases[0]
+    let ancestorNames = ""
+    let ancestor = cmd.parent
+    while (ancestor != null) {
+      ancestorNames = ancestor.getName() + " " + ancestorNames
+      ancestor = ancestor.parent
+    }
+    return ancestorNames + cmdName + " " + cmd.getUsage()
+  }
+
+  public virtual commandDescription(cmd: Command): string {
+    return cmd.getDescription()
+  }
+
+  /// What the list of subcommands says of one: its summary, else its description.
+  public virtual subcommandDescription(cmd: Command): string {
+    const s = cmd.getSummary()
+    return if (s != "") s else cmd.getDescription()
+  }
+
+  /// The option's description with its choices, default, preset and environment variable.
+  public virtual optionDescription(option: Option): string {
+    const extra: string[] = []
+    const choices = option.argChoices
+    if (choices != null) extra.push(`choices: ${choices.map((c: string) => JSON.stringify(c)).join(", ")}`)
+    const def = option.defaultValue
+    if (def != null) {
+      const showDefault = option.required || option.optional || (option.isBoolean() && def is Value.Bool(_))
+      if (showDefault) extra.push(`default: ${option.defaultValueDescription ?? jsonValue(def)}`)
+    }
+    const preset = option.presetArg
+    if (preset != null && option.optional) extra.push(`preset: ${jsonValue(preset)}`)
+    const envVar = option.envVar
+    if (envVar != null) extra.push(`env: ${envVar}`)
+    if (extra.length > 0) return `${option.description} (${extra.join(", ")})`
+    return option.description
+  }
+
+  /// The argument's description with its choices and default.
+  public virtual argumentDescription(argument: Argument): string {
+    const extra: string[] = []
+    const choices = argument.argChoices
+    if (choices != null) extra.push(`choices: ${choices.map((c: string) => JSON.stringify(c)).join(", ")}`)
+    const def = argument.defaultValue
+    if (def != null) extra.push(`default: ${argument.defaultValueDescription ?? jsonValue(def)}`)
+    if (extra.length > 0) {
+      const extraDescription = `(${extra.join(", ")})`
+      if (argument.description != "") return `${argument.description} ${extraDescription}`
+      return extraDescription
+    }
+    return argument.description
+  }
+
+  /// The width of the term column: the longest term of every list.
+  public virtual padWidth(cmd: Command): int {
+    return imax(imax(longestOptionTermLength(cmd), longestGlobalOptionTermLength(cmd)),
+      imax(longestSubcommandTermLength(cmd), longestArgumentTermLength(cmd)))
+  }
+
+  /// Whether `str` is laid out already (a line break followed by a space or a tab): it isn't wrapped.
+  public virtual preformatted(str: string): bool {
+    return str.includes("\n ") || str.includes("\n\t")
+  }
+
+  /// `term`, padded to `termWidth`, and its description wrapped beside it; indented by 2.
+  public virtual formatItem(term: string, termWidth: int, description: string): string {
+    const itemIndent = "  "
+    if (description == "") return itemIndent + term
+    const spacerWidth = 2
+    const remainingWidth = (helpWidth ?? 80) - termWidth - spacerWidth - 2
+    let formatted = description
+    if (remainingWidth >= minWidthToWrap && !preformatted(description)) {
+      formatted = boxWrap(description, remainingWidth).replaceAll("\n", "\n" + " ".repeat(termWidth + spacerWidth))
+    }
+    return itemIndent + term.padEnd(termWidth, " ") + " ".repeat(spacerWidth) + formatted.replaceAll("\n", "\n" + itemIndent)
+  }
+
+  /// A heading, its items and an empty line; nothing without items.
+  public virtual formatItemList(heading: string, items: string[]): string[] {
+    if (items.length == 0) return []
+    return [heading, ...items, ""]
+  }
+
+  /// Wraps `str` at spaces to `width` columns, keeping its line breaks; a width below
+  /// `minWidthToWrap` leaves it as it is.
+  public virtual boxWrap(str: string, width: int): string {
+    if (width < minWidthToWrap) return str
+    const wrapped: string[] = []
+    for (const line of str.replaceAll("\r\n", "\n").split("\n")) {
+      const chunks = splitChunks(line)
+      if (chunks.length == 0) {
+        wrapped.push("")
+        continue
+      }
+      let sum = chunks[0]
+      for (let i = 1; i < chunks.length; i++) {
+        const chunk = chunks[i]
+        if (sum.length + chunk.length <= width) {
+          sum += chunk
+        } else {
+          wrapped.push(sum)
+          sum = chunk.trimStart()
+        }
+      }
+      wrapped.push(sum)
+    }
+    return wrapped.join("\n")
+  }
+
+  /// The whole help of `cmd`; `width` is the output's, for when `helpWidth` isn't set.
+  public virtual formatHelp(cmd: Command, width: int): string {
+    if (helpWidth == null) helpWidth = width
+    const termWidth = padWidth(cmd)
+    const item = (term: string, description: string): string => formatItem(term, termWidth, description)
+    let output: string[] = [`Usage: ${commandUsage(cmd)}`, ""]
+    const description = commandDescription(cmd)
+    if (description != "") {
+      output.push(boxWrap(description, helpWidth ?? 80))
+      output.push("")
+    }
+    output = output.concat(formatItemList("Arguments:",
+      visibleArguments(cmd).map((a: Argument) => item(argumentTerm(a), argumentDescription(a)))))
+    output = output.concat(formatItemList("Options:",
+      visibleOptions(cmd).map((o: Option) => item(optionTerm(o), optionDescription(o)))))
+    if (showGlobalOptions) {
+      output = output.concat(formatItemList("Global Options:",
+        visibleGlobalOptions(cmd).map((o: Option) => item(optionTerm(o), optionDescription(o)))))
+    }
+    output = output.concat(formatItemList("Commands:",
+      visibleCommands(cmd).map((c: Command) => item(subcommandTerm(c), subcommandDescription(c)))))
+    return output.join("\n")
+  }
+}
+
+/// `line` as runs of whitespace each followed by a word (`"a  b"` is `"a"`, `"  b"`); trailing
+/// whitespace is dropped.
+function splitChunks(line: string): string[] {
+  const chunks: string[] = []
+  let current = ""
+  let inWord = false
+  for (const c of line) {
+    const space = c == ' ' || c == '\t'
+    if (space && inWord) {
+      chunks.push(current)
+      current = ""
+    }
+    inWord = !space
+    current += c.toString()
+  }
+  if (inWord) chunks.push(current)
+  return chunks
+}
+
+function sortKey(o: Option): string {
+  const s = o.short
+  if (s != null) return s.slice(1)
+  return (o.long ?? "").slice(2)
+}

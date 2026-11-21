@@ -1,0 +1,55 @@
+// "(Did you mean …?)" for a mistyped command or option, as commander does it.
+
+import { imax, imin, localeCompare } from "./util"
+
+/// The Damerau-Levenshtein distance (optimal string alignment) between `a` and `b`.
+export function editDistance(a: string, b: string): int {
+  const d: int[][] = []
+  for (let i = 0; i <= a.length; i++) {
+    const row: int[] = []
+    for (let j = 0; j <= b.length; j++) row.push(if (i == 0) j else if (j == 0) i else 0)
+    d.push(row)
+  }
+  for (let j = 1; j <= b.length; j++) {
+    for (let i = 1; i <= a.length; i++) {
+      const cost = if (a[i - 1] == b[j - 1]) 0 else 1
+      let best = imin(d[i - 1][j] + 1, d[i][j - 1] + 1)
+      best = imin(best, d[i - 1][j - 1] + cost)
+      if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1]) {
+        best = imin(best, d[i - 2][j - 2] + 1)
+      }
+      d[i][j] = best
+    }
+  }
+  return d[a.length][b.length]
+}
+
+/// The text commander adds to an error when `word` is close to one of `candidates`.
+export function suggestSimilar(word: string, candidates: string[]): string {
+  if (candidates.length == 0) return ""
+  const searchingOptions = word.startsWith("--")
+  const w = if (searchingOptions) word.slice(2) else word
+  let similar: string[] = []
+  let bestDistance = 3
+  const minSimilarity = 0.4
+  for (const c of candidates) {
+    const candidate = if (searchingOptions) c.slice(2) else c
+    if (candidate.length <= 1) continue
+    const distance = editDistance(w, candidate)
+    const length = imax(w.length, candidate.length)
+    const similarity = ((length - distance) as number) / (length as number)
+    if (similarity > minSimilarity) {
+      if (distance < bestDistance) {
+        bestDistance = distance
+        similar = [candidate]
+      } else if (distance == bestDistance) {
+        similar.push(candidate)
+      }
+    }
+  }
+  similar.sort(localeCompare)
+  if (searchingOptions) similar = similar.map((c: string) => `--${c}`)
+  if (similar.length > 1) return `\n(Did you mean one of ${similar.join(", ")}?)`
+  if (similar.length == 1) return `\n(Did you mean ${similar[0]}?)`
+  return ""
+}

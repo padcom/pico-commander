@@ -1,0 +1,1236 @@
+// Command: a program or one of its subcommands, its options and arguments, and the parser.
+// It follows commander.js (v14) closely; README.md lists where it differs.
+
+import { args as processArgs, env, exit, stderr } from "std/process"
+import { Argument, humanReadableArgName } from "./argument"
+import { CommanderError, InvalidArgumentError } from "./errors"
+import { Help, HelpConfiguration } from "./help"
+import { Option } from "./option"
+import { suggestSimilar } from "./suggest"
+import { Default, Parser, Value, Values, sameValue, textValue, toValue } from "./value"
+
+/// What an action receives: its arguments by name (and in order), its options, the command.
+export type ActionHandler = (args: Values, opts: Values, cmd: Command) => void throws Error
+export type AsyncActionHandler = (args: Values, opts: Values, cmd: Command) => Promise<void, Error>
+/// A lifecycle hook: the command it was added to, and the command that runs (`preAction`,
+/// `postAction`) or is dispatched to (`preSubcommand`).
+export type Hook = (thisCommand: Command, actionCommand: Command) => void throws Error
+export type AsyncHook = (thisCommand: Command, actionCommand: Command) => Promise<void, Error>
+export type ExitCallback = (err: CommanderError) => void throws Error
+
+/// Where help, the version and errors go (`Command.configureOutput`).
+export struct OutputConfiguration {
+  writeOut?: (str: string) => void
+  writeErr?: (str: string) => void
+  /// Writes an error message (it ends with a line break) with `write` (the `writeErr`).
+  outputError?: (str: string, write: (str: string) => void) => void
+  getOutHelpWidth?: () => int
+  getErrHelpWidth?: () => int
+}
+
+class Output {
+  public writeOut: (str: string) => void = (str: string) => print(str)
+  public writeErr: (str: string) => void = (str: string) => writeStderr(str)
+  public outputError: (str: string, write: (str: string) => void) => void = (str: string, write: (str: string) => void) => write(str)
+  public getOutHelpWidth: () => int = () => 80
+  public getErrHelpWidth: () => int = () => 80
+
+  public copy(): Output {
+    const o = new Output()
+    o.writeOut = writeOut
+    o.writeErr = writeErr
+    o.outputError = outputError
+    o.getOutHelpWidth = getOutHelpWidth
+    o.getErrHelpWidth = getErrHelpWidth
+    return o
+  }
+}
+
+function writeStderr(str: string): void {
+  // Writes are in order with `print`, and done before `exit` ends the process.
+  stderr.writeText(str).catch((_: Error) => 0)
+}
+
+/// A hook or an action, ready to run.
+class Step {
+  public sync: (() => void throws Error)?
+  public async_: (() => Promise<void, Error>)?
+
+  constructor(sync: (() => void throws Error)?, async_: (() => Promise<void, Error>)?) {
+    this.sync = sync
+    this.async_ = async_
+  }
+}
+
+/// Runs the steps of a parse: at once for `parse`, after it for `parseAsync`.
+class Runner {
+  public deferred: bool
+  public steps: Step[] = []
+
+  constructor(deferred: bool) {
+    this.deferred = deferred
+  }
+
+  public add(step: Step): void throws Error {
+    if (deferred) {
+      steps.push(step)
+      return
+    }
+    const s = step.sync
+    if (s == null) panic("an async action or hook needs parseAsync(), not parse()")
+    s()
+  }
+}
+
+class HookEntry {
+  public event: string
+  public sync: Hook?
+  public async_: AsyncHook?
+
+  constructor(event: string, sync: Hook?, async_: AsyncHook?) {
+    this.event = event
+    this.sync = sync
+    this.async_ = async_
+  }
+}
+
+class HelpText {
+  constructor(public position: string, public text: string) {}
+}
+
+/// A parsed command line: the operands and what wasn't recognised (from the first unknown
+/// option on).
+export struct ParseOptionsResult {
+  operands: string[]
+  unknown: string[]
+}
+
+export class Command {
+  public commands: Command[] = []
+  public options: Option[] = []
+  public parent: Command? = null
+  public registeredArguments: Argument[] = []
+  /// The command line this command got: operands and unknown options (after `parse`).
+  public args: string[] = []
+  /// The arguments as the action gets them (after `parse`).
+  public processedArgs: Values = new Values()
+
+  private cmdName: string
+  private aliasNames: string[] = []
+  private descriptionText: string = ""
+  private summaryText: string = ""
+  private usageText: string? = null
+  private versionText: string? = null
+  private versionOptionName: string? = null
+  private actionSync: ActionHandler? = null
+  private actionAsync_: AsyncActionHandler? = null
+  private optionValues: Map<string, Value> = new Map<string, Value>()
+  private optionValueSources: Map<string, string> = new Map<string, string>()
+  private allowUnknown: bool = false
+  private allowExcess: bool = false
+  private positionalOptions: bool = false
+  private passThrough: bool = false
+  private combineFlagAndOptional: bool = true
+  private helpAfterError: bool = false
+  private helpAfterErrorMessage: string? = null
+  private suggestionAfterError: bool = true
+  private defaultCommandName: string? = null
+  private hiddenCommand: bool = false
+  private exitCallback: ExitCallback? = null
+  private exitOverridden: bool = false
+  private output: Output = new Output()
+  private helpConfiguration: HelpConfiguration? = null
+  private helpOptionValue: Option? = null
+  private helpOptionDisabled: bool = false
+  private helpCommandValue: Command? = null
+  /// null: a help command when there are subcommands and no action.
+  private addImplicitHelpCommand: bool? = null
+  private hooks: HookEntry[] = []
+  private helpTexts: HelpText[] = []
+
+  constructor(name: string = "") {
+    this.cmdName = name
+  }
+
+  // ---- building ----
+
+  /// Adds a subcommand and returns it (not `this`): `command("clone <source> [dest]")`. It takes
+  /// this command's settings as they are now.
+  public command(nameAndArgs: string, isDefault: bool = false, hidden: bool = false): Command {
+    const trimmed = nameAndArgs.trim()
+    const space = trimmed.indexOf(" ")
+    const name = if (space < 0) trimmed else trimmed.slice(0, space)
+    const rest = if (space < 0) "" else trimmed.slice(space + 1).trim()
+    const cmd = createCommand(name)
+    if (isDefault) defaultCommandName = name
+    if (hidden) cmd.hiddenCommand = true
+    if (rest != "") cmd.arguments(rest)
+    registerCommand(cmd)
+    cmd.parent = this
+    cmd.copyInheritedSettings(this)
+    return cmd
+  }
+
+  /// A new command (`command` uses it): override it to have subcommands of a subclass.
+  public virtual createCommand(name: string = ""): Command {
+    return new Command(name)
+  }
+
+  /// The `Help` that lays out this command's help; override it for one of your own.
+  public virtual createHelp(): Help {
+    return new Help(helpConfiguration)
+  }
+
+  /// Settings of the help (`sortOptions`, `helpWidth`, …).
+  public configureHelp(config: HelpConfiguration): Command {
+    helpConfiguration = config
+    return this
+  }
+
+  /// Where help, the version and errors are written, and how wide the help is.
+  public configureOutput(config: OutputConfiguration): Command {
+    const o = output.copy()
+    const writeOut = config.writeOut
+    if (writeOut != null) o.writeOut = writeOut
+    const writeErr = config.writeErr
+    if (writeErr != null) o.writeErr = writeErr
+    const outputError = config.outputError
+    if (outputError != null) o.outputError = outputError
+    const outWidth = config.getOutHelpWidth
+    if (outWidth != null) o.getOutHelpWidth = outWidth
+    const errWidth = config.getErrHelpWidth
+    if (errWidth != null) o.getErrHelpWidth = errWidth
+    output = o
+    return this
+  }
+
+  /// Adds a command made elsewhere (it keeps its own settings).
+  public addCommand(cmd: Command, isDefault: bool = false, hidden: bool = false): Command {
+    if (cmd.cmdName == "") panic("Command passed to .addCommand() must have a name\n- specify the name in Command constructor or using .name()")
+    if (isDefault) defaultCommandName = cmd.cmdName
+    if (hidden) cmd.hiddenCommand = true
+    registerCommand(cmd)
+    cmd.parent = this
+    return this
+  }
+
+  /// A new argument (`argument` uses it).
+  public virtual createArgument(name: string, description: string = ""): Argument {
+    return new Argument(name, description)
+  }
+
+  /// Adds an argument: `<required>`, `[optional]`, `<rest...>`.
+  public argument(name: string, description: string = "", defaultValue: Default? = null, parser: Parser? = null): Command {
+    const arg = createArgument(name, description)
+    if (parser != null) arg.argParser(parser)
+    if (defaultValue != null) arg.default(defaultValue)
+    return addArgument(arg)
+  }
+
+  /// Adds several arguments at once: `arguments("<cmd> [env]")`.
+  public arguments(names: string): Command {
+    for (const detail of names.trim().split(" ")) {
+      if (detail != "") argument(detail)
+    }
+    return this
+  }
+
+  public addArgument(arg: Argument): Command {
+    if (registeredArguments.length > 0 && registeredArguments[registeredArguments.length - 1].variadic) {
+      panic(`only the last argument can be variadic '${registeredArguments[registeredArguments.length - 1].name()}'`)
+    }
+    if (arg.required && arg.defaultValue != null && arg.parseArg == null) {
+      panic(`a default value for a required argument is never used: '${arg.name()}'`)
+    }
+    registeredArguments.push(arg)
+    return this
+  }
+
+  /// The help command's name, arguments and description (`help [command]`); `enabled: false`
+  /// turns it off, `enabled: true` adds it even without subcommands.
+  public helpCommand(nameAndArgs: string = "help [command]", description: string = "display help for command", enabled: bool = true): Command {
+    addImplicitHelpCommand = enabled
+    if (!enabled) return this
+    const trimmed = nameAndArgs.trim()
+    const space = trimmed.indexOf(" ")
+    const cmd = createCommand(if (space < 0) trimmed else trimmed.slice(0, space))
+    cmd.helpOption(enabled: false)
+    if (space >= 0) cmd.arguments(trimmed.slice(space + 1))
+    if (description != "") cmd.description(description)
+    helpCommandValue = cmd
+    return this
+  }
+
+  /// The help command, when this command has one.
+  public getHelpCommand(): Command? {
+    const implicit = addImplicitHelpCommand ?? (commands.length > 0 && actionSync == null && actionAsync_ == null && findCommand("help") == null)
+    if (!implicit) return null
+    if (helpCommandValue == null) helpCommand()
+    return helpCommandValue
+  }
+
+  /// Runs `fn` at a point of the parse: `preAction` and `postAction` (around the action of this
+  /// command or of any subcommand), `preSubcommand` (before a subcommand is parsed).
+  public hook(event: string, fn: Hook): Command {
+    checkHookEvent(event)
+    hooks.push(new HookEntry(event, fn, null))
+    return this
+  }
+
+  /// `hook` for an async function; it needs `parseAsync`.
+  public hookAsync(event: string, fn: AsyncHook): Command {
+    checkHookEvent(event)
+    hooks.push(new HookEntry(event, null, fn))
+    return this
+  }
+
+  /// Throw `CommanderError` instead of exiting. With `fn`, it's called with the error; when it
+  /// returns, the process exits as it would have.
+  public exitOverride(fn: ExitCallback? = null): Command {
+    exitOverridden = true
+    exitCallback = fn
+    return this
+  }
+
+  /// What runs when the command is parsed: `(args, opts, cmd) => …`.
+  public action(fn: ActionHandler): Command {
+    actionSync = fn
+    actionAsync_ = null
+    return this
+  }
+
+  /// `action` for an async function; it needs `parseAsync`.
+  public actionAsync(fn: AsyncActionHandler): Command {
+    actionAsync_ = fn
+    actionSync = null
+    return this
+  }
+
+  /// A new option (`option` uses it).
+  public virtual createOption(flags: string, description: string = ""): Option {
+    return new Option(flags, description)
+  }
+
+  /// Adds an option: `-d, --debug`, `-p, --port <number>`, `-c, --cheese [type]`, `--no-sauce`,
+  /// `-n, --names <names...>`. A parser turns the text into the value (`parseInteger`,
+  /// `collect`, your own), and gets the value so far, starting with the default.
+  public option(flags: string, description: string = "", defaultValue: Default? = null, parser: Parser? = null): Command {
+    return addOption(makeOption(flags, description, defaultValue, parser))
+  }
+
+  /// `option` for an option that must be given (or have a default).
+  public requiredOption(flags: string, description: string = "", defaultValue: Default? = null, parser: Parser? = null): Command {
+    const o = makeOption(flags, description, defaultValue, parser)
+    o.makeOptionMandatory()
+    return addOption(o)
+  }
+
+  public addOption(option: Option): Command {
+    registerOption(option)
+    const name = option.attributeName()
+    if (option.negate) {
+      // A `--no-x` alone defaults `x` to true; with `--x` too, `--x`'s default counts.
+      const positive = "--" + (option.long ?? "").slice(5)
+      if (findOption(positive) == null) {
+        setOptionValueWithSource(name, option.defaultValue ?? Value.Bool(true), "default")
+      }
+    } else {
+      const d = option.defaultValue
+      if (d != null) setOptionValueWithSource(name, d, "default")
+    }
+    return this
+  }
+
+  /// Sets the version and adds the option that shows it (`-V, --version`).
+  public version(str: string, flags: string = "-V, --version", description: string = "output the version number"): Command {
+    versionText = str
+    const o = createOption(flags, description)
+    versionOptionName = o.attributeName()
+    registerOption(o)
+    return this
+  }
+
+  public getVersion(): string? {
+    return versionText
+  }
+
+  /// The help option's flags and description; `enabled: false` turns it off.
+  public helpOption(flags: string = "-h, --help", description: string = "display help for command", enabled: bool = true): Command {
+    helpOptionDisabled = !enabled
+    helpOptionValue = if (enabled) createOption(flags, description) else null
+    return this
+  }
+
+  /// The help option, unless it's turned off.
+  public getHelpOption(): Option? {
+    if (helpOptionDisabled) return null
+    if (helpOptionValue == null) helpOptionValue = createOption("-h, --help", "display help for command")
+    return helpOptionValue
+  }
+
+  /// Adds text to the help: `beforeAll` and `afterAll` (also in subcommands' help), `before`, `after`.
+  public addHelpText(position: string, text: string): Command {
+    if (position != "beforeAll" && position != "before" && position != "after" && position != "afterAll") {
+      panic(`Unexpected value for position to addHelpText.\nExpecting one of 'beforeAll', 'before', 'after', 'afterAll'`)
+    }
+    helpTexts.push(new HelpText(position, text))
+    return this
+  }
+
+  // ---- settings ----
+
+  public name(str: string): Command {
+    cmdName = str
+    return this
+  }
+
+  public getName(): string {
+    return cmdName
+  }
+
+  public description(str: string): Command {
+    descriptionText = str
+    return this
+  }
+
+  public getDescription(): string {
+    return descriptionText
+  }
+
+  /// A short description for the parent's list of subcommands.
+  public summary(str: string): Command {
+    summaryText = str
+    return this
+  }
+
+  public getSummary(): string {
+    return summaryText
+  }
+
+  /// Another name for the command.
+  public alias(name: string): Command {
+    if (name == cmdName) panic("Command alias can't be the same as its name")
+    const p = parent
+    if (p != null) {
+      const existing = p.findCommand(name)
+      if (existing != null) panic(`cannot add alias '${name}' to command '${cmdName}' as already have command '${existing.cmdName}'`)
+    }
+    aliasNames.push(name)
+    return this
+  }
+
+  public aliases(names: string[]): Command {
+    for (const n of names) alias(n)
+    return this
+  }
+
+  public getAliases(): string[] {
+    return aliasNames
+  }
+
+  /// What the "Usage:" line shows after the command's name.
+  public usage(str: string): Command {
+    usageText = str
+    return this
+  }
+
+  public getUsage(): string {
+    const u = usageText
+    if (u != null) return u
+    const parts: string[] = []
+    if (options.length > 0 || !helpOptionDisabled) parts.push("[options]")
+    if (commands.length > 0) parts.push("[command]")
+    for (const a of registeredArguments) parts.push(humanReadableArgName(a))
+    return parts.join(" ")
+  }
+
+  public isHidden(): bool {
+    return hiddenCommand
+  }
+
+  /// Unknown options become operands instead of an error.
+  public allowUnknownOption(allow: bool = true): Command {
+    allowUnknown = allow
+    return this
+  }
+
+  /// More arguments than declared aren't an error.
+  public allowExcessArguments(allow: bool = true): Command {
+    allowExcess = allow
+    return this
+  }
+
+  /// Program options are recognised only before a subcommand.
+  public enablePositionalOptions(positional: bool = true): Command {
+    positionalOptions = positional
+    return this
+  }
+
+  /// Options after the first operand are passed on as operands (for a command that runs another
+  /// program). A subcommand needs `enablePositionalOptions` on its parent.
+  public passThroughOptions(passThrough: bool = true): Command {
+    this.passThrough = passThrough
+    const p = parent
+    if (passThrough && p != null && !p.positionalOptions) {
+      panic(`passThroughOptions cannot be used for '${cmdName}' without turning on enablePositionalOptions for parent command(s)`)
+    }
+    return this
+  }
+
+  /// Whether `-ovalue` gives an option with an optional value its value (default), or is `-o -v -a …`.
+  public combineFlagAndOptionalValue(combine: bool = true): Command {
+    combineFlagAndOptional = combine
+    return this
+  }
+
+  /// Shows help (or `message`) after an error.
+  public showHelpAfterError(message: string? = null, enabled: bool = true): Command {
+    helpAfterError = enabled
+    helpAfterErrorMessage = message
+    return this
+  }
+
+  /// Suggests a similar command or option for an unknown one (on by default).
+  public showSuggestionAfterError(show: bool = true): Command {
+    suggestionAfterError = show
+    return this
+  }
+
+  /// Takes the settings a subcommand inherits from its parent.
+  public copyInheritedSettings(source: Command): Command {
+    output = source.output
+    helpOptionValue = source.helpOptionValue
+    helpOptionDisabled = source.helpOptionDisabled
+    helpCommandValue = source.helpCommandValue
+    helpConfiguration = source.helpConfiguration
+    exitCallback = source.exitCallback
+    exitOverridden = source.exitOverridden
+    combineFlagAndOptional = source.combineFlagAndOptional
+    allowExcess = source.allowExcess
+    positionalOptions = source.positionalOptions
+    helpAfterError = source.helpAfterError
+    helpAfterErrorMessage = source.helpAfterErrorMessage
+    suggestionAfterError = source.suggestionAfterError
+    return this
+  }
+
+  // ---- values ----
+
+  /// The options' values by attribute name.
+  public opts(): Values {
+    const v = new Values()
+    for (const [k, value] of optionValues) v.set(k, value)
+    return v
+  }
+
+  /// `opts` with the values of the parent commands (a parent's value wins, as in commander).
+  public optsWithGlobals(): Values {
+    const v = new Values()
+    for (const c of commandAndAncestors()) {
+      for (const [k, value] of c.optionValues) v.set(k, value)
+    }
+    return v
+  }
+
+  public getOptionValue(key: string): Value? {
+    return optionValues.get(key) ?? null
+  }
+
+  public setOptionValue(key: string, value: Default): Command {
+    return setOptionValueWithSource(key, toValue(value), null)
+  }
+
+  /// Sets a value and where it came from: `default`, `env`, `cli`, `config`, `implied`.
+  public setOptionValueWithSource(key: string, value: Value, source: string?): Command {
+    optionValues.set(key, value)
+    if (source != null) {
+      optionValueSources.set(key, source);
+    } else {
+      optionValueSources.delete(key);
+    }
+    return this
+  }
+
+  public getOptionValueSource(key: string): string? {
+    return optionValueSources.get(key) ?? null
+  }
+
+  /// Where the value came from, looking at the parent commands too.
+  public getOptionValueSourceWithGlobals(key: string): string? {
+    let source: string? = null
+    for (const c of commandAndAncestors()) {
+      const s = c.getOptionValueSource(key)
+      if (s != null) source = s
+    }
+    return source
+  }
+
+  // ---- parsing ----
+
+  /// Parses the command line (default: the program's arguments) and runs the actions. Errors in
+  /// it are written and end the process, unless `exitOverride` makes them a `CommanderError`.
+  public parse(argv: string[]? = null): Command throws Error {
+    const runner = new Runner(false)
+    parseCommand([], prepareUserArgs(argv), runner)
+    return this
+  }
+
+  /// `parse` for async actions and hooks: they run, one after the other, after the parse.
+  public async parseAsync(argv: string[]? = null): Promise<Command> throws Error {
+    const runner = new Runner(true)
+    parseCommand([], prepareUserArgs(argv), runner)
+    for (const step of runner.steps) {
+      const s = step.sync
+      const a = step.async_
+      if (s != null) {
+        s()
+      } else if (a != null) {
+        await a()
+      }
+    }
+    return this
+  }
+
+  /// Splits `argv` into operands and unknown options, setting the values of the options it
+  /// knows. Exported for a program that drives the parse itself.
+  public parseOptions(argv: string[]): ParseOptionsResult throws Error {
+    const operands: string[] = []
+    const unknown: string[] = []
+    let toUnknown = false
+    const queue = argv.slice(0)
+    let i = 0
+    let activeVariadic: Option? = null
+    const push = (s: string) => {
+      if (toUnknown) unknown.push(s) else operands.push(s)
+    }
+    const pushRest = () => {
+      while (i < queue.length) {
+        push(queue[i])
+        i++
+      }
+    }
+    while (i < queue.length) {
+      const arg = queue[i]
+      i++
+      if (arg == "--") {
+        if (toUnknown) push(arg)
+        pushRest()
+        break
+      }
+      const av = activeVariadic
+      if (av != null && (!maybeOption(arg) || negativeNumberArg(arg))) {
+        emitOption(av, arg)
+        continue
+      }
+      activeVariadic = null
+      if (maybeOption(arg)) {
+        const option = findOption(arg)
+        if (option != null) {
+          if (option.required) {
+            if (i >= queue.length) optionMissingArgument(option)
+            const value = queue[i]
+            i++
+            emitOption(option, value)
+          } else if (option.optional) {
+            let value: string? = null
+            if (i < queue.length && (!maybeOption(queue[i]) || negativeNumberArg(queue[i]))) {
+              value = queue[i]
+              i++
+            }
+            emitOption(option, value)
+          } else {
+            emitOption(option, null)
+          }
+          activeVariadic = if (option.variadic) option else null
+          continue
+        }
+      }
+      // -abc (flags) or -pvalue
+      if (arg.length > 2 && arg.startsWith("-") && !arg.startsWith("--")) {
+        const option = findOption(arg.slice(0, 2))
+        if (option != null) {
+          if (option.required || (option.optional && combineFlagAndOptional)) {
+            emitOption(option, arg.slice(2))
+          } else {
+            emitOption(option, null)
+            i--
+            queue[i] = "-" + arg.slice(2)
+          }
+          continue
+        }
+      }
+      // --name=value
+      if (arg.startsWith("--")) {
+        const eq = arg.indexOf("=")
+        if (eq > 2) {
+          const option = findOption(arg.slice(0, eq))
+          if (option != null && (option.required || option.optional)) {
+            emitOption(option, arg.slice(eq + 1))
+            continue
+          }
+        }
+      }
+      // A negative number in a command without subcommands is an operand, not an unknown option.
+      if (maybeOption(arg) && !(commands.length == 0 && negativeNumberArg(arg))) toUnknown = true
+      if ((positionalOptions || passThrough) && operands.length == 0 && unknown.length == 0) {
+        if (findCommand(arg) != null) {
+          operands.push(arg)
+          toUnknown = true
+          pushRest()
+          break
+        }
+        const hc = getHelpCommand()
+        if (hc != null && arg == hc.cmdName) {
+          operands.push(arg)
+          toUnknown = true
+          pushRest()
+          break
+        }
+        if (defaultCommandName != null) {
+          toUnknown = true
+          push(arg)
+          pushRest()
+          break
+        }
+      }
+      if (passThrough) {
+        push(arg)
+        pushRest()
+        break
+      }
+      push(arg)
+    }
+    return { operands, unknown }
+  }
+
+  // ---- help and errors ----
+
+  /// The help text.
+  public helpInformation(error: bool = false): string {
+    const helper = createHelp()
+    const getWidth = if (error) output.getErrHelpWidth else output.getOutHelpWidth
+    return helper.formatHelp(this, getWidth())
+  }
+
+  /// Writes the help (to stderr with `error`) and goes on.
+  public outputHelp(error: bool = false): void {
+    const write = if (error) output.writeErr else output.writeOut
+    const chain = commandAndAncestors()
+    for (let i = chain.length - 1; i >= 0; i--) chain[i].writeHelpTexts("beforeAll", write)
+    writeHelpTexts("before", write)
+    write(helpInformation(error))
+    writeHelpTexts("after", write)
+    for (const c of chain) c.writeHelpTexts("afterAll", write)
+  }
+
+  /// Writes the help and exits (with 1 for `error`).
+  public help(error: bool = false): never throws Error {
+    outputHelp(error)
+    exitWith(if (error) 1 else 0, "commander.help", "(outputHelp)")
+  }
+
+  /// Reports an error as commander's own are reported, and exits.
+  public error(message: string, exitCode: int = 1, code: string = "commander.error"): never throws Error {
+    const outputError = output.outputError
+    const writeErr = output.writeErr
+    outputError(`${message}\n`, writeErr)
+    if (helpAfterError) {
+      const m = helpAfterErrorMessage
+      if (m != null) {
+        writeErr(`${m}\n`)
+      } else {
+        writeErr("\n")
+        outputHelp(true)
+      }
+    }
+    exitWith(exitCode, code, message)
+  }
+
+  // ---- internals (public for Help and for subclasses) ----
+
+  /// The option with the flag `arg`.
+  public findOption(arg: string): Option? {
+    for (const o of options) {
+      if (o.is(arg)) return o
+    }
+    return null
+  }
+
+  /// The subcommand called `name` (or with that alias).
+  public findCommand(name: string): Command? {
+    for (const c of commands) {
+      if (c.cmdName == name || c.aliasNames.includes(name)) return c
+    }
+    return null
+  }
+
+  /// This command and its parents, this one first.
+  public commandAndAncestors(): Command[] {
+    const out: Command[] = []
+    let c: Command? = this
+    while (c != null) {
+      out.push(c)
+      c = c.parent
+    }
+    return out
+  }
+
+  private writeHelpTexts(position: string, write: (str: string) => void): void {
+    for (const t of helpTexts) {
+      if (t.position == position) write(`${t.text}\n`)
+    }
+  }
+
+  private exitWith(exitCode: int, code: string, message: string): never throws Error {
+    const err = new CommanderError(exitCode, code, message)
+    if (exitOverridden) {
+      const cb = exitCallback
+      if (cb == null) throw err
+      cb(err)
+    }
+    exit(exitCode as i32)
+    panic("exit returned")
+  }
+
+  private registerCommand(cmd: Command): void {
+    const taken = (name: string): Command? => findCommand(name)
+    let clash = taken(cmd.cmdName)
+    for (const a of cmd.aliasNames) {
+      if (clash == null) clash = taken(a)
+    }
+    if (clash != null) {
+      panic(`cannot add command '${cmd.cmdName}' as already have command '${clash.cmdName}'`)
+    }
+    commands.push(cmd)
+  }
+
+  private registerOption(option: Option): void {
+    const s = option.short
+    const l = option.long
+    let clash: Option? = null
+    if (s != null) clash = findOption(s)
+    if (clash == null && l != null) clash = findOption(l)
+    if (clash != null) {
+      const flag = if (l != null && clash.long == l) l else s ?? ""
+      panic(`Cannot add option '${option.flags}'${if (cmdName != "") ` to command '${cmdName}'` else ""} due to conflicting flag '${flag}'\n-  already used by option '${clash.flags}'`)
+    }
+    options.push(option)
+  }
+
+  private makeOption(flags: string, description: string, defaultValue: Default?, parser: Parser?): Option {
+    const o = createOption(flags, description)
+    if (parser != null) o.argParser(parser)
+    if (defaultValue != null) o.default(defaultValue)
+    return o
+  }
+
+  private checkHookEvent(event: string): void {
+    if (event != "preAction" && event != "postAction" && event != "preSubcommand") {
+      panic(`Unexpected value for event passed to hook : '${event}'.\nExpecting one of 'preSubcommand', 'preAction', 'postAction'`)
+    }
+  }
+
+  private prepareUserArgs(argv: string[]?): string[] {
+    if (cmdName == "") cmdName = "program"
+    return (argv ?? processArgs).slice(0)
+  }
+
+  private maybeOption(arg: string): bool {
+    return arg.length > 1 && arg.startsWith("-")
+  }
+
+  /// `-5`, `-.5`, `-1e3`: a value, unless a command of the hierarchy has a digit as a short flag.
+  private negativeNumberArg(arg: string): bool {
+    if (!isNegativeNumber(arg)) return false
+    for (const c of commandAndAncestors()) {
+      for (const o of c.options) {
+        const s = o.short
+        if (s != null && s.length == 2 && s[1] >= '0' && s[1] <= '9') return false
+      }
+    }
+    return true
+  }
+
+  /// An option was given (`value` null: without a value).
+  private emitOption(option: Option, given: string?): void throws Error {
+    const name = option.attributeName()
+    if (versionOptionName != null && name == versionOptionName && option.isBoolean()) {
+      const writeOut = output.writeOut
+      writeOut(`${versionText ?? ""}\n`)
+      exitWith(0, "commander.version", versionText ?? "")
+    }
+    let value: Value? = null
+    if (given != null) value = Value.Str(given)
+    if (given == null && option.presetArg != null) value = option.presetArg
+    const old = getOptionValue(name)
+    const oldSource = getOptionValueSource(name)
+    const parseArg = option.parseArg
+    if (value == null && parseArg != null && !option.optional) {
+      // A flag with a parser (`increase`): commander calls it without a value.
+      value = try {
+        parseArg("", old)
+      } catch (e: InvalidArgumentError) {
+        error(`error: option '${option.flags}' is invalid. ${e.message}`, e.exitCode, e.code)
+      }
+    } else if (value != null) {
+      const parser = option.parseArg
+      if (parser != null || option.argChoices != null) {
+        const message = `error: option '${option.flags}' argument '${textValue(value)}' is invalid.`
+        value = callParseArg(parser, option.argChoices, value, old, message)
+      } else if (option.variadic && given != null) {
+        if (old is Value.List(items) && oldSource != "default") {
+          value = Value.List([...items, given])
+        } else {
+          value = Value.List([given])
+        }
+      }
+    }
+    const v = value ?? (if (option.negate) Value.Bool(false) else if (option.isBoolean() || option.optional) Value.Bool(true) else Value.Str(""))
+    setOptionValueWithSource(name, v, "cli")
+  }
+
+  private callParseArg(parser: Parser?, choices: string[]?, value: Value, previous: Value?, invalidMessage: string): Value throws Error {
+    const text = textValue(value)
+    if (choices != null && !choices.includes(text)) {
+      error(`${invalidMessage} Allowed choices are ${choices.join(", ")}.`, 1, "commander.invalidArgument")
+    }
+    if (parser == null) return value
+    return try {
+      parser(text, previous)
+    } catch (e: InvalidArgumentError) {
+      error(`${invalidMessage} ${e.message}`, e.exitCode, e.code)
+    }
+  }
+
+  private optionMissingArgument(option: Option): never throws Error {
+    error(`error: option '${option.flags}' argument missing`, 1, "commander.optionMissingArgument")
+  }
+
+  private parseCommand(operandsBefore: string[], unknownBefore: string[], runner: Runner): void throws Error {
+    const parsed = parseOptions(unknownBefore)
+    parseOptionsEnv()
+    parseOptionsImplied()
+    const operands = operandsBefore.concat(parsed.operands)
+    const unknown = parsed.unknown
+    this.args = operands.concat(unknown)
+
+    if (operands.length > 0 && findCommand(operands[0]) != null) {
+      dispatchSubcommand(operands[0], operands.slice(1), unknown, runner)
+      return
+    }
+    const hc = getHelpCommand()
+    if (hc != null && operands.length > 0 && operands[0] == hc.cmdName) {
+      dispatchHelpCommand(if (operands.length > 1) operands[1] else null, runner)
+      return
+    }
+    const dc = defaultCommandName
+    if (dc != null) {
+      outputHelpIfRequested(unknown)
+      dispatchSubcommand(dc, operands, unknown, runner)
+      return
+    }
+    const hasAction = actionSync != null || actionAsync_ != null
+    if (commands.length > 0 && this.args.length == 0 && !hasAction) help(true)
+
+    outputHelpIfRequested(parsed.unknown)
+    checkForMissingMandatoryOptions()
+    checkForConflictingOptions()
+    const checkForUnknownOptions = () => {
+      if (parsed.unknown.length > 0) unknownOption(parsed.unknown[0])
+    }
+
+    if (hasAction) {
+      checkForUnknownOptions()
+      processArguments()
+      const chain = commandAndAncestors()
+      for (let i = chain.length - 1; i >= 0; i--) chain[i].addHooks("preAction", this, runner)
+      const s = actionSync
+      const a = actionAsync_
+      if (s != null) {
+        const fn: ActionHandler = s
+        runner.add(new Step(() => fn(processedArgs, opts(), this), null))
+      }
+      if (a != null) {
+        const fn: AsyncActionHandler = a
+        runner.add(new Step(null, () => fn(processedArgs, opts(), this)))
+      }
+      for (const c of chain) c.addHooks("postAction", this, runner)
+      return
+    }
+    if (operands.length > 0) {
+      if (commands.length > 0) unknownCommand()
+      checkForUnknownOptions()
+      processArguments()
+    } else if (commands.length > 0) {
+      checkForUnknownOptions()
+      help(true)
+    } else {
+      checkForUnknownOptions()
+      processArguments()
+    }
+  }
+
+  private addHooks(event: string, actionCommand: Command, runner: Runner): void throws Error {
+    for (const h of hooks) {
+      if (h.event != event) continue
+      const s = h.sync
+      const a = h.async_
+      if (s != null) {
+        const fn: Hook = s
+        runner.add(new Step(() => fn(this, actionCommand), null))
+      }
+      if (a != null) {
+        const fn: AsyncHook = a
+        runner.add(new Step(null, () => fn(this, actionCommand)))
+      }
+    }
+  }
+
+  private dispatchSubcommand(name: string, operands: string[], unknown: string[], runner: Runner): void throws Error {
+    const sub = findCommand(name)
+    if (sub == null) {
+      help(true)
+    }
+    const chain = commandAndAncestors()
+    for (let i = chain.length - 1; i >= 0; i--) chain[i].addHooks("preSubcommand", sub, runner)
+    sub.parseCommand(operands, unknown, runner)
+  }
+
+  private dispatchHelpCommand(name: string?, runner: Runner): void throws Error {
+    if (name == null) help()
+    const sub = findCommand(name)
+    if (sub != null) sub.help()
+    // An unknown name: the help flag goes to the subcommand dispatch, which shows this help as an error.
+    const ho = getHelpOption()
+    dispatchSubcommand(name, [], [ho?.long ?? ho?.short ?? "--help"], runner)
+  }
+
+  private outputHelpIfRequested(argv: string[]): void throws Error {
+    const ho = getHelpOption()
+    if (ho == null) return
+    for (const a of argv) {
+      if (ho.is(a)) {
+        outputHelp()
+        exitWith(0, "commander.helpDisplayed", "(outputHelp)")
+      }
+    }
+  }
+
+  private parseOptionsEnv(): void throws Error {
+    for (const option of options) {
+      const name = option.envVar
+      if (name == null) continue
+      const value = env.get(name)
+      if (value == null) continue
+      const key = option.attributeName()
+      const source = getOptionValueSource(key)
+      if (getOptionValue(key) == null || source == "default" || source == "config" || source == "env") {
+        if (option.required || option.optional) {
+          emitOption(option, value)
+        } else {
+          emitOption(option, null)
+        }
+        // emitOption marks it "cli"; it came from the environment.
+        optionValueSources.set(key, "env")
+      }
+    }
+  }
+
+  /// Whether the value of a `--x`/`--no-x` pair means `option` (the positive or the negative one).
+  private valueFromOption(value: Value, option: Option): bool {
+    const key = option.attributeName()
+    let negative: Option? = null
+    let positive = false
+    for (const o of options) {
+      if (o.attributeName() != key) continue
+      if (o.negate) negative = o else positive = true
+    }
+    if (negative == null || !positive) return true
+    const negativeValue = negative.presetArg ?? Value.Bool(false)
+    return option.negate == sameValue(negativeValue, value)
+  }
+
+  private hasCustomOptionValue(key: string): bool {
+    const source = getOptionValueSource(key)
+    return getOptionValue(key) != null && source != "default" && source != "implied"
+  }
+
+  private parseOptionsImplied(): void {
+    for (const option of options) {
+      const implied = option.implied
+      if (implied == null) continue
+      const key = option.attributeName()
+      const value = getOptionValue(key)
+      if (value == null || !hasCustomOptionValue(key) || !valueFromOption(value, option)) continue
+      for (const [k, v] of implied) {
+        if (!hasCustomOptionValue(k)) setOptionValueWithSource(k, v, "implied")
+      }
+    }
+  }
+
+  private checkForMissingMandatoryOptions(): void throws Error {
+    for (const c of commandAndAncestors()) {
+      for (const o of c.options) {
+        if (o.mandatory && c.getOptionValue(o.attributeName()) == null) {
+          c.error(`error: required option '${o.flags}' not specified`, 1, "commander.missingMandatoryOptionValue")
+        }
+      }
+    }
+  }
+
+  private checkForConflictingOptions(): void throws Error {
+    for (const c of commandAndAncestors()) c.checkForConflictingLocalOptions()
+  }
+
+  private checkForConflictingLocalOptions(): void throws Error {
+    const defined = options.filter((o: Option) => {
+      const key = o.attributeName()
+      return getOptionValue(key) != null && getOptionValueSource(key) != "default"
+    })
+    for (const option of defined) {
+      if (option.conflictsWith.length == 0) continue
+      for (const other of defined) {
+        if (option.conflictsWith.includes(other.attributeName())) conflictingOption(option, other)
+      }
+    }
+  }
+
+  private conflictingOption(option: Option, conflicting: Option): never throws Error {
+    const describe = (o: Option): string => {
+      const key = o.attributeName()
+      const value = getOptionValue(key)
+      let best = o
+      let negative: Option? = null
+      let positive: Option? = null
+      for (const t of options) {
+        if (t.attributeName() != key) continue
+        if (t.negate) negative = t else positive = t
+      }
+      if (negative != null && value != null && sameValue(value, negative.presetArg ?? Value.Bool(false))) {
+        best = negative
+      } else if (positive != null) {
+        best = positive
+      }
+      if (getOptionValueSource(key) == "env") return `environment variable '${best.envVar ?? ""}'`
+      return `option '${best.flags}'`
+    }
+    error(`error: ${describe(option)} cannot be used with ${describe(conflicting)}`, 1, "commander.conflictingOption")
+  }
+
+  private unknownOption(flag: string): void throws Error {
+    if (allowUnknown) return
+    let suggestion = ""
+    if (flag.startsWith("--") && suggestionAfterError) {
+      const candidates: string[] = []
+      let c: Command? = this
+      while (c != null) {
+        for (const o of c.createHelp().visibleOptions(c)) {
+          const l = o.long
+          if (l != null) candidates.push(l)
+        }
+        c = if (c.positionalOptions) null else c.parent
+      }
+      suggestion = suggestSimilar(flag, candidates)
+    }
+    error(`error: unknown option '${flag}'${suggestion}`, 1, "commander.unknownOption")
+  }
+
+  private unknownCommand(): never throws Error {
+    const unknownName = this.args[0]
+    let suggestion = ""
+    if (suggestionAfterError) {
+      const candidates: string[] = []
+      for (const c of createHelp().visibleCommands(this)) {
+        candidates.push(c.cmdName)
+        for (const a of c.aliasNames) candidates.push(a)
+      }
+      suggestion = suggestSimilar(unknownName, candidates)
+    }
+    error(`error: unknown command '${unknownName}'${suggestion}`, 1, "commander.unknownCommand")
+  }
+
+  private processArguments(): void throws Error {
+    const given = this.args
+    for (let i = 0; i < registeredArguments.length; i++) {
+      const a = registeredArguments[i]
+      if (a.required && i >= given.length) {
+        error(`error: missing required argument '${a.name()}'`, 1, "commander.missingArgument")
+      }
+    }
+    if (!allowExcess && (registeredArguments.length == 0 || !registeredArguments[registeredArguments.length - 1].variadic) &&
+        given.length > registeredArguments.length) {
+      const expected = registeredArguments.length
+      const s = if (expected == 1) "" else "s"
+      const forSubcommand = if (parent != null) ` for '${cmdName}'` else ""
+      error(`error: too many arguments${forSubcommand}. Expected ${expected} argument${s} but got ${given.length}.`, 1, "commander.excessArguments")
+    }
+    const values = new Values()
+    for (let i = 0; i < registeredArguments.length; i++) {
+      const a = registeredArguments[i]
+      let value = a.defaultValue
+      if (a.variadic) {
+        if (i < given.length) {
+          const rest = given.slice(i)
+          if (a.parseArg != null || a.argChoices != null) {
+            let acc = a.defaultValue
+            for (const r of rest) acc = parseArgumentValue(a, r, acc)
+            value = acc
+          } else {
+            value = Value.List(rest)
+          }
+        } else if (value == null) {
+          value = Value.List([])
+        }
+      } else if (i < given.length) {
+        value = parseArgumentValue(a, given[i], a.defaultValue)
+      }
+      values.set(a.name(), value)
+    }
+    processedArgs = values
+  }
+
+  private parseArgumentValue(a: Argument, text: string, previous: Value?): Value throws Error {
+    if (a.parseArg == null && a.argChoices == null) return Value.Str(text)
+    return callParseArg(a.parseArg, a.argChoices, Value.Str(text), previous,
+      `error: command-argument value '${text}' is invalid for argument '${a.name()}'.`)
+  }
+}
+
+function isDigits(s: string): bool {
+  if (s == "") return false
+  for (const c of s) {
+    if (c < '0' || c > '9') return false
+  }
+  return true
+}
+
+/// Whether `arg` matches `-(\d+|\d*\.\d+)(e[+-]?\d+)?`.
+function isNegativeNumber(arg: string): bool {
+  if (!arg.startsWith("-")) return false
+  let body = arg.slice(1)
+  const e = body.indexOf("e")
+  if (e >= 0) {
+    let exponent = body.slice(e + 1)
+    if (exponent.startsWith("+") || exponent.startsWith("-")) exponent = exponent.slice(1)
+    if (!isDigits(exponent)) return false
+    body = body.slice(0, e)
+  }
+  const dot = body.indexOf(".")
+  if (dot < 0) return isDigits(body)
+  return (dot == 0 || isDigits(body.slice(0, dot))) && isDigits(body.slice(dot + 1))
+}
+
+/// A new command (as `new Command(name)`).
+export function createCommand(name: string = ""): Command {
+  return new Command(name)
+}
+
+/// A new option (as `new Option(flags, description)`).
+export function createOption(flags: string, description: string = ""): Option {
+  return new Option(flags, description)
+}
+
+/// A new argument (as `new Argument(name, description)`).
+export function createArgument(name: string, description: string = ""): Argument {
+  return new Argument(name, description)
+}

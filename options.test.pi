@@ -1,0 +1,285 @@
+// Options: flags, values, defaults, negation, variadic, parsers, env, preset, implies, conflicts.
+import { describe, it, expect } from "std/test"
+import { env } from "std/process"
+import { Command, CommanderError, InvalidArgumentError, Option, Value, collect, increase, parseInteger } from "./index"
+
+/// A program that throws instead of exiting and keeps what it writes.
+class Probe {
+  public out: string = ""
+  public err: string = ""
+  public program: Command = new Command("test")
+
+  constructor() {
+    program.exitOverride().configureOutput({
+      writeOut: (s: string) => { out += s },
+      writeErr: (s: string) => { err += s },
+    })
+  }
+
+  /// The error code a parse ended with ("" when it didn't fail).
+  public fails(argv: string[]): string {
+    try {
+      program.parse(argv)
+    } catch (e: CommanderError) {
+      return e.code
+    } catch (e) {
+      return `other: ${e.message}`
+    }
+    return ""
+  }
+}
+
+describe("boolean options", () => {
+  it("are true when given and absent otherwise", () => {
+    const p = new Probe()
+    p.program.option("-d, --debug", "debug").option("-v, --verbose")
+    p.program.parse(["-d"])
+    expect(p.program.opts().bool("debug")).toBe(true)
+    expect(p.program.opts().has("verbose")).toBe(false)
+  })
+
+  it("combine as -abc", () => {
+    const p = new Probe()
+    p.program.option("-a").option("-b").option("-c")
+    p.program.parse(["-abc"])
+    expect(`${p.program.opts()}`).toBe("{ a: true, b: true, c: true }")
+  })
+
+  it("--no-x alone defaults x to true", () => {
+    const p = new Probe()
+    p.program.option("--no-sauce", "no sauce")
+    p.program.parse([])
+    expect(p.program.opts().bool("sauce")).toBe(true)
+    p.program.parse(["--no-sauce"])
+    expect(p.program.opts().bool("sauce")).toBe(false)
+  })
+
+  it("--x with --no-x has no default", () => {
+    const p = new Probe()
+    p.program.option("--cheese").option("--no-cheese")
+    p.program.parse([])
+    expect(p.program.opts().has("cheese")).toBe(false)
+    p.program.parse(["--no-cheese"])
+    expect(p.program.getOptionValue("cheese") is Value.Bool(false)).toBe(true)
+  })
+
+  it("camel-case their name", () => {
+    const p = new Probe()
+    p.program.option("--dry-run-mode")
+    p.program.parse(["--dry-run-mode"])
+    expect(p.program.opts().keys()).toEqual(["dryRunMode"])
+  })
+})
+
+describe("options with values", () => {
+  it("take the next argument, =value or -pvalue", () => {
+    const p = new Probe()
+    p.program.option("-p, --pizza-type <type>", "flavour")
+    p.program.parse(["-p", "cheese"])
+    expect(p.program.opts().string("pizzaType") ?? "").toBe("cheese")
+    p.program.parse(["--pizza-type=ham"])
+    expect(p.program.opts().string("pizzaType") ?? "").toBe("ham")
+    p.program.parse(["-pveg"])
+    expect(p.program.opts().string("pizzaType") ?? "").toBe("veg")
+  })
+
+  it("take a value that looks like an option", () => {
+    const p = new Probe()
+    p.program.option("-o, --out <file>")
+    p.program.parse(["-o", "-x"])
+    expect(p.program.opts().string("out") ?? "").toBe("-x")
+  })
+
+  it("fail without their value", () => {
+    const p = new Probe()
+    p.program.option("-p, --port <n>")
+    expect(p.fails(["--port"])).toBe("commander.optionMissingArgument")
+    expect(p.err).toBe("error: option '-p, --port <n>' argument missing\n")
+  })
+
+  it("have defaults", () => {
+    const p = new Probe()
+    p.program.option("-s, --sep <c>", "", ",").option("-n <n>", "", 3).option("-x <x>", "", 1.5)
+    p.program.parse([])
+    expect(p.program.opts().string("sep") ?? "").toBe(",")
+    expect(p.program.opts().int("n") ?? 0).toBe(3)
+    expect(p.program.opts().number("x") ?? 0.0).toBe(1.5)
+    expect(p.program.getOptionValueSource("sep") ?? "").toBe("default")
+    p.program.parse(["-s", ";"])
+    expect(p.program.getOptionValueSource("sep") ?? "").toBe("cli")
+  })
+
+  it("optional values are true without one, or the preset", () => {
+    const p = new Probe()
+    p.program.option("-c, --cheese [type]")
+    p.program.addOption(new Option("--level [n]").preset("high"))
+    p.program.parse(["-c"])
+    expect(p.program.opts().bool("cheese")).toBe(true)
+    expect(p.program.opts().string("cheese") == null).toBe(true)
+    p.program.parse(["-c", "blue", "--level"])
+    expect(p.program.opts().string("cheese") ?? "").toBe("blue")
+    expect(p.program.opts().string("level") ?? "").toBe("high")
+  })
+
+  it("an optional value isn't taken from the next option", () => {
+    const p = new Probe()
+    p.program.option("-c, --cheese [type]").option("-d")
+    p.program.parse(["-c", "-d"])
+    expect(`${p.program.opts()}`).toBe("{ cheese: true, d: true }")
+  })
+
+  it("variadic values run to the next option", () => {
+    const p = new Probe()
+    p.program.option("-n, --names <names...>").option("-d")
+    p.program.parse(["-n", "a", "b", "-d", "-n", "c"])
+    expect(p.program.opts().strings("names")).toEqual(["a", "b", "c"])
+  })
+
+  it("variadic values replace the default", () => {
+    const p = new Probe()
+    p.program.option("-n, --names <names...>", "", Value.List(["x"]))
+    p.program.parse(["-n", "a"])
+    expect(p.program.opts().strings("names")).toEqual(["a"])
+  })
+})
+
+describe("parsers and choices", () => {
+  it("parseInteger gives an Int, and rejects other text", () => {
+    const p = new Probe()
+    p.program.option("-p, --port <n>", "port", parser: parseInteger)
+    p.program.parse(["-p", "8080"])
+    expect(p.program.opts().int("port") ?? 0).toBe(8080)
+    expect(p.fails(["-p", "80x"])).toBe("commander.invalidArgument")
+    expect(p.err).toBe("error: option '-p, --port <n>' argument '80x' is invalid. Not an integer.\n")
+  })
+
+  it("increase counts -vvv", () => {
+    const p = new Probe()
+    p.program.option("-v, --verbose", "verbosity", 0, increase)
+    p.program.parse(["-vvv"])
+    expect(p.program.opts().int("verbose") ?? 0).toBe(3)
+  })
+
+  it("collect gathers a repeated option", () => {
+    const p = new Probe()
+    p.program.option("-I, --include <dir>", "", parser: collect)
+    p.program.parse(["-I", "a", "--include", "b", "-Ic"])
+    expect(p.program.opts().strings("include")).toEqual(["a", "b", "c"])
+  })
+
+  it("a custom parser's InvalidArgumentError becomes the error message", () => {
+    const p = new Probe()
+    p.program.option("--even <n>", "", parser: (v, _prev) => {
+      const n = parseInteger(v, null)
+      if (n is Value.Int(x) && x % 2 == 0) return n
+      throw new InvalidArgumentError("Not even.")
+    })
+    expect(p.fails(["--even", "3"])).toBe("commander.invalidArgument")
+    expect(p.err).toBe("error: option '--even <n>' argument '3' is invalid. Not even.\n")
+  })
+
+  it("other errors from a parser go through", () => {
+    const p = new Probe()
+    p.program.option("--x <n>", "", parser: (_v, _prev) => { throw new Error("boom") })
+    expect(p.fails(["--x", "1"])).toBe("other: boom")
+  })
+
+  it("choices", () => {
+    const p = new Probe()
+    p.program.addOption(new Option("-s, --size <size>", "drink size").choices(["small", "medium", "large"]))
+    p.program.parse(["-s", "small"])
+    expect(p.program.opts().string("size") ?? "").toBe("small")
+    expect(p.fails(["-s", "huge"])).toBe("commander.invalidArgument")
+    expect(p.err).toBe("error: option '-s, --size <size>' argument 'huge' is invalid. Allowed choices are small, medium, large.\n")
+  })
+})
+
+describe("mandatory, env, implies and conflicts", () => {
+  it("requiredOption fails when missing", () => {
+    const p = new Probe()
+    p.program.requiredOption("-c, --cheese <type>", "pizza must have cheese")
+    expect(p.fails([])).toBe("commander.missingMandatoryOptionValue")
+    expect(p.err).toBe("error: required option '-c, --cheese <type>' not specified\n")
+  })
+
+  it("requiredOption is satisfied by a default", () => {
+    const p = new Probe()
+    p.program.requiredOption("-c, --cheese <type>", "", "mozzarella")
+    expect(p.fails([])).toBe("")
+  })
+
+  it("env gives a value the command line doesn't", () => {
+    env.set("COMMANDER_TEST_PORT", "99")
+    env.set("COMMANDER_TEST_FLAG", "1")
+    const p = new Probe()
+    p.program.addOption(new Option("-p, --port <n>").env("COMMANDER_TEST_PORT"))
+    p.program.addOption(new Option("--flag").env("COMMANDER_TEST_FLAG"))
+    p.program.parse([])
+    expect(p.program.opts().string("port") ?? "").toBe("99")
+    expect(p.program.opts().bool("flag")).toBe(true)
+    expect(p.program.getOptionValueSource("port") ?? "").toBe("env")
+    p.program.parse(["-p", "1"])
+    expect(p.program.opts().string("port") ?? "").toBe("1")
+    env.delete("COMMANDER_TEST_PORT")
+    env.delete("COMMANDER_TEST_FLAG")
+  })
+
+  it("implies sets the values it names", () => {
+    const p = new Probe()
+    p.program.addOption(new Option("--quiet").implies({ logLevel: "off" }))
+    p.program.option("--log-level <level>", "", "info")
+    p.program.parse(["--quiet"])
+    expect(p.program.opts().string("logLevel") ?? "").toBe("off")
+    p.program.parse(["--quiet", "--log-level", "debug"])
+    expect(p.program.opts().string("logLevel") ?? "").toBe("debug")
+  })
+
+  it("conflicts", () => {
+    const p = new Probe()
+    p.program.addOption(new Option("--cash").conflicts("creditCard"))
+    p.program.option("--credit-card")
+    expect(p.fails(["--cash", "--credit-card"])).toBe("commander.conflictingOption")
+    expect(p.err).toBe("error: option '--cash' cannot be used with option '--credit-card'\n")
+  })
+
+  it("unknown options fail, with a suggestion", () => {
+    const p = new Probe()
+    p.program.option("--verbose")
+    expect(p.fails(["--verbos"])).toBe("commander.unknownOption")
+    expect(p.err).toBe("error: unknown option '--verbos'\n(Did you mean --verbose?)\n")
+  })
+
+  it("allowUnknownOption passes them on", () => {
+    const p = new Probe()
+    p.program.allowUnknownOption().allowExcessArguments()
+    p.program.parse(["--what", "x"])
+    expect(p.program.args).toEqual(["--what", "x"])
+  })
+
+  it("negative numbers are values, unless a short flag is a digit", () => {
+    const p = new Probe()
+    p.program.option("-o, --offset [n]").option("-l, --list <v...>").argument("[x]")
+    p.program.parse(["-o", "-5", "-l", "-1", "-2.5", "-.5"])
+    expect(p.program.opts().string("offset") ?? "").toBe("-5")
+    expect(p.program.opts().strings("list")).toEqual(["-1", "-2.5", "-.5"])
+    p.program.parse(["-1e3"])
+    expect(p.program.args).toEqual(["-1e3"])
+    const q = new Probe()
+    q.program.option("-1, --one").argument("[x]")
+    expect(q.fails(["-5"])).toBe("commander.unknownOption")
+  })
+
+  it("-- ends the options", () => {
+    const p = new Probe()
+    p.program.option("-d").argument("[rest...]")
+    p.program.parse(["--", "-d"])
+    expect(p.program.opts().has("d")).toBe(false)
+    expect(p.program.args).toEqual(["-d"])
+  })
+
+  it("setting an option twice is a mistake", () => {
+    const p = new Probe()
+    p.program.option("-d, --debug")
+    expect(() => { p.program.option("-d, --dry") }).toPanic("conflicting flag '-d'")
+  })
+})

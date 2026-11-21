@@ -1,0 +1,181 @@
+// Option: a flag such as `-p, --pizza-type <type>`, and what it takes.
+
+import { Default, Parser, Value, toValue } from "./value"
+
+/// An option of a command. Most programs make them with `Command.option`; `new Option`
+/// with `Command.addOption` gives the rest (choices, env, preset, conflicts, implies, …).
+export class Option {
+  public flags: string
+  public description: string
+  /// `<value>`: the option needs a value.
+  public required: bool
+  /// `[value]`: the option takes a value, but may be given without one.
+  public optional: bool
+  /// `<value...>`: every value up to the next option.
+  public variadic: bool
+  /// Whether the option must be given (`requiredOption`).
+  public mandatory: bool = false
+  public short: string?
+  public long: string?
+  /// `--no-…`: sets the value to false.
+  public negate: bool
+  public defaultValue: Value? = null
+  public defaultValueDescription: string? = null
+  public presetArg: Value? = null
+  public envVar: string? = null
+  public parseArg: Parser? = null
+  public hidden: bool = false
+  public argChoices: string[]? = null
+  public conflictsWith: string[] = []
+  public implied: Map<string, Value>? = null
+
+  constructor(flags: string, description: string = "") {
+    this.flags = flags
+    this.description = description
+    this.required = flags.includes("<")
+    this.optional = flags.includes("[")
+    this.variadic = flags.endsWith("...>") || flags.endsWith("...]")
+    const parts = splitOptionFlags(flags)
+    this.short = parts[0]
+    this.long = parts[1]
+    this.negate = parts[1] != null && parts[1]!.startsWith("--no-")
+  }
+
+  /// The value when the option isn't given; `description` is what help shows instead of it.
+  public default(value: Default, description: string? = null): Option {
+    defaultValue = toValue(value)
+    defaultValueDescription = description
+    return this
+  }
+
+  /// The value for an option with an optional value that's given without one.
+  public preset(arg: Default): Option {
+    presetArg = toValue(arg)
+    return this
+  }
+
+  /// Options (by attribute name) that can't be used together with this one.
+  public conflicts(...names: string[]): Option {
+    for (const n of names) conflictsWith.push(n)
+    return this
+  }
+
+  /// Other options' values that this option sets when it's given and they aren't:
+  /// `.implies({ dryRun: true, mode: "fast" })`.
+  public implies(values: Map<string, Default>): Option {
+    const all = implied ?? new Map<string, Value>()
+    for (const [k, v] of values) all.set(k, toValue(v))
+    implied = all
+    return this
+  }
+
+  /// An environment variable that gives the option when the command line doesn't.
+  public env(name: string): Option {
+    envVar = name
+    return this
+  }
+
+  /// A function that turns the text given into the option's value.
+  public argParser(fn: Parser): Option {
+    parseArg = fn
+    return this
+  }
+
+  /// Makes the option required: the parse fails when it has no value.
+  public makeOptionMandatory(mandatory: bool = true): Option {
+    this.mandatory = mandatory
+    return this
+  }
+
+  /// Leaves the option out of the help.
+  public hideHelp(hide: bool = true): Option {
+    hidden = hide
+    return this
+  }
+
+  /// The only values the option accepts.
+  public choices(values: string[]): Option {
+    argChoices = values.slice(0)
+    return this
+  }
+
+  /// The name without dashes: `pizza-type`, `no-sauce`, `d`.
+  public name(): string {
+    const l = long
+    if (l != null) return l.slice(2)
+    return (short ?? "").slice(1)
+  }
+
+  /// The key of the option's value: `pizzaType` (`--no-sauce` is `sauce`).
+  public attributeName(): string {
+    const n = name()
+    return camelcase(if (n.startsWith("no-")) n.slice(3) else n)
+  }
+
+  /// Whether `arg` is one of the option's flags.
+  public is(arg: string): bool {
+    return short == arg || long == arg
+  }
+
+  /// Whether the option is a plain flag: no value, not negated.
+  public isBoolean(): bool {
+    return !required && !optional && !negate
+  }
+}
+
+/// `pizza-type` → `pizzaType`.
+export function camelcase(s: string): string {
+  const words = s.split("-")
+  let out = words[0]
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i]
+    out += if (w == "") "" else w.slice(0, 1).toUpperCase() + w.slice(1)
+  }
+  return out
+}
+
+function isShortFlag(s: string): bool {
+  return s.length == 2 && s.startsWith("-") && !s.startsWith("--")
+}
+
+function isLongFlag(s: string): bool {
+  return s.length > 2 && s.startsWith("--") && !s.startsWith("---")
+}
+
+/// The short and the long flag of `-p, --pizza <type>` (either may be missing). Flags that
+/// aren't `-x` or `--word` are a mistake in the program: a panic.
+export function splitOptionFlags(flags: string): [string?, string?] {
+  const parts: string[] = []
+  for (const p of flags.replaceAll(",", " ").replaceAll("|", " ").split(" ")) {
+    if (p != "") parts.push(p)
+  }
+  parts.push("guard")
+  let i = 0
+  let shortFlag: string? = null
+  let longFlag: string? = null
+  if (isShortFlag(parts[i])) {
+    shortFlag = parts[i]
+    i++
+  }
+  if (isLongFlag(parts[i])) {
+    longFlag = parts[i]
+    i++
+  }
+  if (shortFlag == null && isShortFlag(parts[i])) {
+    shortFlag = parts[i]
+    i++
+  }
+  // Two long flags: the first one stands in for the short one.
+  if (shortFlag == null && isLongFlag(parts[i])) {
+    shortFlag = longFlag
+    longFlag = parts[i]
+    i++
+  }
+  if (parts[i].startsWith("-")) {
+    panic(`option creation failed due to '${parts[i]}' in option flags '${flags}'\n- a short flag is a single dash and a single character\n  - either use a single dash and a single character (for a short flag)\n  - or use a double dash for a long option (and can have two, like '--ws, --workspace')`)
+  }
+  if (shortFlag == null && longFlag == null) {
+    panic(`option creation failed due to no flags found in '${flags}'.`)
+  }
+  return [shortFlag, longFlag]
+}

@@ -1,1 +1,192 @@
-# Pico Commander
+# pico-commander
+
+[commander.js](https://github.com/tj/commander.js) for [Pico](https://github.com/padcom/pico-lang): options, arguments,
+subcommands and generated help for command-line programs. It follows commander 14: the same API wherever Pico allows
+it, and the same parsing, error messages, exit codes and help layout (checked against commander.js 14.0.3 on the same
+programs). It is plain Pico, with no native code, so it runs on every platform Pico does.
+
+## Use
+
+```ts
+import { Command } from "padcom/commander"
+
+const program = new Command()
+
+program
+  .name("string-util")
+  .description("CLI to some JavaScript string utilities")
+  .version("0.8.0")
+
+program.command("split")
+  .description("Split a string into substrings and display as an array")
+  .argument("<string>", "string to split")
+  .option("--first", "display just the first substring")
+  .option("-s, --separator <char>", "separator character", ",")
+  .action((args, opts, _cmd) => {
+    const parts = args.string("string")!.split(opts.string("separator")!)
+    println(`${if (opts.bool("first")) parts.slice(0, 1) else parts:?}`)
+  })
+
+program.parse()
+```
+
+```
+$ string-util --help
+Usage: string-util [options] [command]
+
+CLI to some JavaScript string utilities
+
+Options:
+  -V, --version             output the version number
+  -h, --help                display help for command
+
+Commands:
+  split [options] <string>  Split a string into substrings and display as an
+                            array
+  help [command]            display help for command
+```
+
+`program` is also exported, ready-made, as in commander. `parse()` reads `std/process`'s `args`; `parse(["-d", "x"])`
+parses a list of your own (it is always the user's arguments: there is no `from: "node"`).
+
+## Options
+
+```ts
+program
+  .option("-d, --debug", "output extra debugging")                 // a flag
+  .option("-p, --pizza-type <type>", "flavour of pizza")            // needs a value
+  .option("-c, --cheese [type]", "add cheese", "mozzarella")        // optional value, with a default
+  .option("--no-sauce", "remove sauce")                             // `sauce` is true unless --no-sauce
+  .option("-t, --toppings <items...>", "toppings")                  // every value up to the next option
+  .option("-n, --count <n>", "how many", 1, parseInteger)           // a parser, with a default
+  .option("-v, --verbose", "verbosity", 0, increase)                // -vvv is 3
+  .option("-I, --include <dir>", "include directory", parser: collect)  // repeatable
+  .requiredOption("-o, --out <file>", "where to write")             // must be given
+  .addOption(new Option("-s, --size <size>").choices(["small", "medium", "large"]).default("medium"))
+  .addOption(new Option("--port <n>").env("PORT").argParser(parseInteger))
+  .addOption(new Option("--level [l]").preset("high"))
+  .addOption(new Option("--quiet").implies({ logLevel: "off" }))
+  .addOption(new Option("--cash").conflicts("creditCard"))
+  .addOption(new Option("--secret").hideHelp())
+```
+
+Short flags combine (`-abc`, `-n5`), long options take `--name=value`, `--` ends the options, and a negative number
+(`-5`, `-1.5`) is a value, not an option, unless a short flag is a digit.
+
+## Values
+
+Commander keeps whatever JavaScript value a parser returns; Pico is statically typed, so a value is a `Value`:
+`Bool`, `Str`, `Int`, `Num` or `List` (of strings). `opts()` and the arguments an action gets are `Values`, which read
+them back by name:
+
+| | |
+|---|---|
+| `bool(name)` | given and truthy (a flag, a non-empty string, a non-zero number, a list) |
+| `string(name)` | a string (or a number as text); `null` for a flag without a value, a list or nothing |
+| `strings(name)` | a list; a single string is a list of one; nothing is `[]` |
+| `int(name)`, `number(name)` | an `Int`/`Num`, or a string that is one; else `null` |
+| `get(name)`, `at(i)`, `has(name)`, `keys()`, `length` | the `Value?` itself, by name or position |
+
+Defaults, presets and implied values can be given as `bool`, `string`, `int`, `number` or a `Value`
+(`Value.List(["a"])`). A parser is `(value: string, previous: Value?) => Value throws Error`; throw
+`InvalidArgumentError` to reject the text, and commander's message says what was wrong:
+
+```
+error: option '-n, --count <n>' argument 'x' is invalid. Not an integer.
+```
+
+The package's parsers: `parseInteger`, `parseNumber`, `collect` (a repeated option into a list) and `increase`
+(counting a flag).
+
+## Arguments and subcommands
+
+```ts
+program.command("clone <source> [destination]")
+  .description("clone a repository")
+  .alias("cl")
+  .option("--depth <n>", "history depth", parser: parseInteger)
+  .action((args, opts, cmd) => {
+    println(`${args.string("source")} → ${args.string("destination") ?? "."}`)
+    println(`${cmd.optsWithGlobals()}`)                  // this command's options and its parents'
+  })
+
+program.command("serve", isDefault: true)                // runs when no subcommand is named
+program.command("debug", hidden: true)                   // not in the help
+program.addCommand(new Command("build").argument("<files...>"))
+program.addArgument(new Argument("[mode]", "how").choices(["fast", "slow"]).default("fast"))
+```
+
+A missing required argument, too many arguments (unless `allowExcessArguments()`), an unknown option (unless
+`allowUnknownOption()`) and an unknown command are errors, with "(Did you mean …?)" for close misspellings.
+`enablePositionalOptions()` and `passThroughOptions()` work as in commander.
+
+## Actions, hooks and async
+
+```ts
+program.hook("preAction", (thisCommand, actionCommand) => { … })   // also postAction, preSubcommand
+
+async function deploy(args: Values, opts: Values, cmd: Command): Promise<void> throws Error { … }
+program.command("deploy <env>").actionAsync(deploy)
+await program.parseAsync()
+```
+
+`parse()` runs actions and hooks as it goes; an async one needs `actionAsync`/`hookAsync` and `parseAsync()`, which
+validates the whole command line and then runs them in order, each awaited.
+
+## Help, version, errors and output
+
+`version(v, flags?, description?)`, `helpOption(flags, description)` (`helpOption(enabled: false)` turns it off),
+`helpCommand(nameAndArgs, description)` (`enabled: false`, or `true` to add it without subcommands),
+`addHelpText("beforeAll" | "before" | "after" | "afterAll", text)`, `usage(text)`, `summary(text)`,
+`showHelpAfterError(message?)`, `showSuggestionAfterError(false)`, `configureHelp({ helpWidth, sortOptions,
+sortSubcommands, showGlobalOptions })`, `help(error?)`, `outputHelp(error?)`, `helpInformation()`, and
+`error(message, exitCode, code)` for errors of your own.
+
+By default errors and help-on-error go to stderr and end the program (exit code 1; 0 for `--help` and `--version`).
+`exitOverride()` throws a `CommanderError` (with commander's `code`, such as `commander.unknownOption`, and the
+`exitCode`) instead; `exitOverride(fn)` calls `fn` with it first. `configureOutput({ writeOut, writeErr, outputError,
+getOutHelpWidth, getErrHelpWidth })` sends the output elsewhere; tests use both:
+
+```ts
+let err = ""
+program.exitOverride().configureOutput({ writeErr: (s: string) => { err += s } })
+```
+
+`Help`'s methods are virtual: override `createHelp()` in a `Command` subclass for a layout of your own.
+
+## Differences from commander.js
+
+Most come from Pico not having method overloads, `any` or `undefined`:
+
+- **Getters are separate methods**: `name("x")` sets and `getName()` reads; likewise `getDescription()`, `getSummary()`,
+  `getUsage()`, `getAliases()`, `getVersion()`.
+- **Values are typed**: see [Values](#values). Options are read with `opts().string("x")` and friends, not as
+  properties (there is no `storeOptionsAsProperties`).
+- **The action gets `(args, opts, cmd)`**: the arguments as one `Values`, not spread.
+- **A parser is a named argument**: `.option(flags, description, defaultValue, parser)`, or
+  `.option(flags, description, parser: fn)`; commander's `(flags, description, fn, default)` order doesn't fit
+  without overloads.
+- **Async uses its own methods**: `actionAsync`, `hookAsync` (Pico has no async lambdas yet, so they take named
+  `async function`s). With `parseAsync`, hooks and actions run after the whole command line is checked, so a
+  `preSubcommand` hook can't change how the subcommand is parsed.
+- **Booleans instead of `false`**: `helpOption(enabled: false)`, `helpCommand(enabled: false)`,
+  `showHelpAfterError(message?, enabled?)`; `command(name, isDefault, hidden)` instead of an options object.
+- **Mistakes in the program panic**: duplicate flags, a variadic argument that isn't last, an unknown hook event.
+  Commander throws a plain `Error` for these.
+- **Help width** defaults to 80 (Pico can't ask the terminal for its width yet); set it with `configureHelp` or
+  `configureOutput`.
+- **Not ported**: stand-alone executable subcommands (`command(name, description)` that runs `prog-name`), the help
+  groups (`helpGroup`, `optionsGroup`), help styling (`styleTitle` …), `addHelpText` with a function,
+  `storeOptionsAsProperties`, `nameFromFilename`/`executableDir`, and the `from: "node" | "electron"` parse options.
+
+## Develop
+
+```
+pico fmt --check . && pico lint . && pico test .
+pico run examples/string-util.pi -- --help
+pico run examples/pizza.pi -- -p hawaiian -c blue -vv
+```
+
+## License
+
+MIT, as commander.js is (see [LICENSE](LICENSE)).
