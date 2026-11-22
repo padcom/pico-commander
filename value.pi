@@ -203,6 +203,17 @@ export class Values {
     return asNumber(get(index))
   }
 
+  /// The values as a JSON object (what `JSON.stringify(opts)` gives in commander): names in
+  /// order, without the unset ones.
+  public json(): string {
+    const parts: string[] = []
+    for (const n of names) {
+      const v = get(n)
+      if (v != null) parts.push(`${Value.Str(n).json()}:${v.json()}`)
+    }
+    return "{" + parts.join(",") + "}"
+  }
+
   public toString(): string {
     const parts: string[] = []
     for (const n of names) {

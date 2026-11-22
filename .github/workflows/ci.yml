@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 env:
-  # 0.6.0 is the first release with method overloading, which this package's API needs.
-  PICO_VERSION: 0.7.0
+  # 0.8.0 is the first release with argv0 and execPath(), which program names and executable
+  # subcommands need.
+  PICO_VERSION: 0.8.0
 
 jobs:
   ci:
@@ -64,3 +65,12 @@ jobs:
           pico build examples/string-util.pi -o "$RUNNER_TEMP/string-util$ext"
           pico build examples/pizza.pi -o "$RUNNER_TEMP/pizza$ext"
           "$RUNNER_TEMP/string-util$ext" split -s / a/b/c
+      - name: An executable subcommand runs
+        run: |
+          ext=${{ startsWith(matrix.target, 'windows') && '.exe' || '' }}
+          mkdir -p "$RUNNER_TEMP/bin"
+          pico build examples/pm.pi -o "$RUNNER_TEMP/bin/pm$ext"
+          pico build examples/pm-install.pi -o "$RUNNER_TEMP/bin/pm-install$ext"
+          out=$(cd / && "$RUNNER_TEMP/bin/pm$ext" install left-pad --force)
+          echo "$out"
+          [ "$out" = "installing left-pad (forced)" ]

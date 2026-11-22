@@ -34,6 +34,13 @@ export struct HelpConfiguration {
   styleArgumentDescription?: (str: string) => string
 }
 
+/// What `prepareContext` is told before the help is laid out (commander 14's context options).
+export struct HelpContextOptions {
+  error?: bool
+  helpWidth?: int
+  outputHasColors?: bool
+}
+
 export class Help {
   public helpWidth: int? = null
   public sortSubcommands: bool = false
@@ -375,9 +382,21 @@ export class Help {
     return wrapped.join("\n")
   }
 
-  /// The whole help of `cmd`; `width` is the output's, for when `helpWidth` isn't set.
+  /// Called before `formatHelp` with the output's width and whether it has colours (and is
+  /// stderr): commander uses the width, unless `helpWidth` is set; a subclass can keep more.
+  public virtual prepareContext(contextOptions: HelpContextOptions): void {
+    helpWidth = helpWidth ?? contextOptions.helpWidth ?? 80
+  }
+
+  /// `prepareContext` with `width`, then `formatHelp(cmd, this)` (0.2's form).
   public virtual formatHelp(cmd: Command, width: int): string {
-    if (helpWidth == null) helpWidth = width
+    prepareContext({ helpWidth: width })
+    return formatHelp(cmd, this)
+  }
+
+  /// The whole help of `cmd`, after `prepareContext`. (Commander lays it out with `helper`'s
+  /// methods; this uses its own, so `helper` is `this` in practice.)
+  public virtual formatHelp(cmd: Command, _helper: Help): string {
     const termWidth = padWidth(cmd)
     const item = (term: string, description: string): string => formatItem(term, termWidth, description)
     let output: string[] = [`${styleTitle("Usage:")} ${styleUsage(commandUsage(cmd))}`, ""]

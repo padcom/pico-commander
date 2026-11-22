@@ -309,3 +309,119 @@ describe("0.2", () => {
     expect(p.program.opts().int("n") ?? 0).toBe(7)
   })
 })
+
+const preSubcommandLog: string[] = []
+
+// commander's parseAsync awaits a preSubcommand hook before it parses the subcommand, so the
+// hook can add to it (commander.js 14 logs the same).
+async function preSubcommandChangesTheSubcommand(): Promise<void> throws Error {
+  const p = new Probe()
+  p.program.hook("preSubcommand", async (_t, sub) => {
+    await Promise.resolve(0)
+    preSubcommandLog.push(`pre ${sub.name()}`)
+    sub.option("--late <v>", "added by the hook")
+  })
+  p.program.hook("preAction", async (_t, a) => { preSubcommandLog.push(`preAction ${a.name()}`) })
+  p.program.command("run").option("--early").action((_args, opts, _cmd) => {
+    preSubcommandLog.push(`run ${opts.json()}`)
+  })
+  await p.program.parseAsync(["run", "--early", "--late", "x"])
+  expect(preSubcommandLog).toEqual(["pre run", "preAction run", "run {\"early\":true,\"late\":\"x\"}"])
+}
+
+function packages(): Probe {
+  const p = new Probe()
+  p.program.name("pm").configureOutput({
+    writeOut: (s: string) => { p.out += s },
+    writeErr: (s: string) => { p.err += s },
+    getOutHelpWidth: () => 80,
+  })
+  p.program.command("install [pkg]", "install one").command("remove", "remove one", { executableFile: "pm-rm" })
+  p.program.command("list").description("list them")
+  return p
+}
+
+const MISSING = " - if '%n' is not meant to be an executable command, remove description parameter from '.command()' and use '.description()' instead\n" +
+  " - if the default executable name is not suitable, use the executableFile option to supply a custom name or path\n"
+
+async function missingExecutables(): Promise<void> throws Error {
+  let message = ""
+  try {
+    await packages().program.parseAsync(["install"])
+  } catch (e) {
+    message = e.message
+  }
+  expect(message).toBe("'pm-install' does not exist\n" + MISSING.replaceAll("%n", "install") +
+      " - no directory for search for local subcommand, use .executableDir() to supply a custom directory")
+  const p = packages()
+  p.program.executableDir("/nowhere")
+  expect(p.program.executableDir()).toBe("/nowhere")
+  try {
+    await p.program.parseAsync(["remove"])
+  } catch (e) {
+    message = e.message
+  }
+  expect(message).toBe("'pm-rm' does not exist\n" + MISSING.replaceAll("%n", "remove") +
+      " - searched for local subcommand relative to directory '/nowhere'")
+}
+
+describe("0.3", () => {
+  it("lists executable subcommands in the help", () => {
+    const p = packages()
+    p.fails(["--help"])
+    expect(p.out).toBe(`Usage: pm [options] [command]
+
+Options:
+  -h, --help      display help for command
+
+Commands:
+  install [pkg]   install one
+  remove          remove one
+  list            list them
+  help [command]  display help for command
+`)
+  })
+
+  it("says where it looked for a missing executable subcommand", missingExecutables)
+
+  it("parses again from the state before the first parse", () => {
+    const p = new Command().exitOverride().option("-n, --num <n>", "a number", "1").option("-v, --verbose")
+    p.action((_a, _o, _c) => {})
+    const sub = p.command("go").option("--fast").action((_a, _o, _c) => {})
+    p.parse(["node", "tool.js", "-v", "-n", "5"], { from: "node" })
+    expect(`${p.name()} ${p.opts().json()} ${p.getOptionValueSource("num") ?? ""} ${p.args.length}`).toBe("tool {\"num\":\"5\",\"verbose\":true} cli 0")
+    p.parse(["go", "--fast"], { from: "user" })
+    expect(`${p.name()} ${p.opts().json()} ${p.getOptionValueSource("num") ?? ""} ${p.args.join(" ")} ${sub.opts().json()}`)
+      .toBe("program {\"num\":\"1\"} default go --fast {\"fast\":true}")
+    p.parse(["go"], { from: "user" })
+    expect(sub.opts().json()).toBe("{}")
+  })
+
+  it("parseAsync awaits preSubcommand hooks before parsing the subcommand", preSubcommandChangesTheSubcommand)
+
+  it("parse takes where its arguments come from", () => {
+    const seen: string[] = []
+    const make = (): Command => {
+      const c = new Command().exitOverride().argument("[x]")
+      c.action((args, _o, _c) => { seen.push(args.string("x") ?? "-") })
+      return c
+    }
+    const node = make()
+    node.parse(["node", "/usr/lib/app/pm.js", "a"], { from: "node" })
+    expect(node.name()).toBe("pm")
+    expect(node.rawArgs).toEqual(["node", "/usr/lib/app/pm.js", "a"])
+    make().parse(["app", "b"], { from: "electron" })
+    make().parse(["c"], { from: "user" })
+    make().parse(["d"])
+    expect(seen).toEqual(["a", "b", "c", "d"])
+    // A name given first stays.
+    const named = new Command("tool").exitOverride()
+    named.parse(["node", "x.js"], { from: "node" })
+    expect(named.name()).toBe("tool")
+  })
+
+  it("nameFromFilename drops the directory and the extension", () => {
+    expect(new Command().nameFromFilename("bin/pm.js").name()).toBe("pm")
+    expect(new Command().nameFromFilename("pm").name()).toBe("pm")
+  })
+})

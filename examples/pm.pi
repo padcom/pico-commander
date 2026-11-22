@@ -1,0 +1,16 @@
+// commander's executable subcommands (its pm example): `pm install` runs the program
+// `pm-install` next to `pm`, with the rest of the command line, and exits with its exit code.
+// The program is named after its executable.
+//
+//   pico build examples/pm.pi -o bin/pm && pico build examples/pm-install.pi -o bin/pm-install
+//   bin/pm install left-pad --force
+//   bin/pm --help
+import { program } from "../index"
+
+program
+  .version("0.1.0")
+  .description("Fake package manager")
+  .command("install [package-names...]", "install one or more packages")
+  .command("list", "list packages installed", { isDefault: true })
+
+program.parse()
