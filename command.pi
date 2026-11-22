@@ -37,15 +37,6 @@ export struct OutputConfiguration {
   stripColor?: (str: string) => string
 }
 
-/// Colours by the usual variables (commander's `useColor`): `NO_COLOR` or `FORCE_COLOR=0`/`false`
-/// turn them off, `FORCE_COLOR` or `CLICOLOR_FORCE` on; `null`: neither.
-function useColor(): bool? {
-  const force = env.get("FORCE_COLOR")
-  if ((env.get("NO_COLOR") ?? "") != "" || force == "0" || force == "false") return false
-  if ((force ?? "") != "" || env.has("CLICOLOR_FORCE")) return true
-  return null
-}
-
 class Output {
   public writeOut: (str: string) => void = (str: string) => print(str)
   public writeErr: (str: string) => void = (str: string) => writeStderr(str)
@@ -53,8 +44,8 @@ class Output {
   // (The terminal's width, as commander's `process.stdout.columns`; 80 when it isn't one.)
   public getOutHelpWidth: () => int = () => stdout.columns ?? 80
   public getErrHelpWidth: () => int = () => stderr.columns ?? 80
-  public getOutHasColors: () => bool = () => useColor() ?? stdout.isTerminal
-  public getErrHasColors: () => bool = () => useColor() ?? stderr.isTerminal
+  public getOutHasColors: () => bool = () => stdout.hasColors()
+  public getErrHasColors: () => bool = () => stderr.hasColors()
   public stripColor: (str: string) => string = (str: string) => stripAnsi(str)
 
   public copy(): Output {
@@ -97,12 +88,6 @@ class SavedState {
     this.values = values
     this.sources = sources
   }
-}
-
-function copyMap<V>(m: Map<string, V>): Map<string, V> {
-  const out = new Map<string, V>()
-  for (const [k, v] of m) out.set(k, v)
-  return out
 }
 
 /// Runs the steps of a parse: at once for `parse`, after it for `parseAsync`.
@@ -879,7 +864,7 @@ export class Command {
   /// Keeps the state a later parse starts from (the name, the option values and their
   /// sources: the defaults); `parse` calls it the first time. A subclass can keep more.
   public virtual saveStateBeforeParse(): void {
-    savedState = new SavedState(cmdName, copyMap(optionValues), copyMap(optionValueSources))
+    savedState = new SavedState(cmdName, new Map(optionValues), new Map(optionValueSources))
   }
 
   /// Goes back to the state `saveStateBeforeParse` kept, for a parse after the first: only
@@ -891,8 +876,8 @@ export class Command {
     scriptPath = null
     scriptFile = null
     rawArgs = []
-    optionValues = copyMap(saved.values)
-    optionValueSources = copyMap(saved.sources)
+    optionValues = new Map(saved.values)
+    optionValueSources = new Map(saved.sources)
     args = []
     processedArgs = new Values()
   }
@@ -1658,28 +1643,11 @@ export class Command {
   }
 }
 
-function isDigits(s: string): bool {
-  if (s == "") return false
-  for (const c of s) {
-    if (c < '0' || c > '9') return false
-  }
-  return true
-}
+/// commander's negative number: `-(\d+|\d*\.\d+)(e[+-]?\d+)?`.
+const NEGATIVE_NUMBER = new RegExp("^-(\\d+|\\d*\\.\\d+)(e[+-]?\\d+)?$")
 
-/// Whether `arg` matches `-(\d+|\d*\.\d+)(e[+-]?\d+)?`.
 function isNegativeNumber(arg: string): bool {
-  if (!arg.startsWith("-")) return false
-  let body = arg.slice(1)
-  const e = body.indexOf("e")
-  if (e >= 0) {
-    let exponent = body.slice(e + 1)
-    if (exponent.startsWith("+") || exponent.startsWith("-")) exponent = exponent.slice(1)
-    if (!isDigits(exponent)) return false
-    body = body.slice(0, e)
-  }
-  const dot = body.indexOf(".")
-  if (dot < 0) return isDigits(body)
-  return (dot == 0 || isDigits(body.slice(0, dot))) && isDigits(body.slice(dot + 1))
+  return NEGATIVE_NUMBER.test(arg)
 }
 
 /// A new command (as `new Command(name)`).

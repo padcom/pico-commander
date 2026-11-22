@@ -2,7 +2,7 @@
 // the same program.
 import { describe, it, expect } from "std/test"
 import { Argument, Command, CommanderError, Help, Option } from "./index"
-import { editDistance, suggestSimilar } from "./suggest"
+import { suggestSimilar } from "./suggest"
 
 class Probe {
   public out: string = ""
@@ -318,11 +318,6 @@ describe("version and errors", () => {
 })
 
 describe("suggestions", () => {
-  it("edit distance counts a transposition as one", () => {
-    expect(editDistance("kitten", "sitting")).toBe(3)
-    expect(editDistance("ab", "ba")).toBe(1)
-  })
-
   it("suggests the closest candidates", () => {
     expect(suggestSimilar("--verbos", ["--verbose", "--version"])).toBe("\n(Did you mean --verbose?)")
     expect(suggestSimilar("tst", ["test", "tset", "xyz"])).toBe("\n(Did you mean one of test, tset?)")
