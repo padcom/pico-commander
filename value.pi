@@ -10,6 +10,28 @@ export enum Value {
   Int(value: int),
   Num(value: number),
   List(items: string[]),
+
+  /// The value as JSON, as commander's help shows defaults: `"text"`, `true`, `3`, `["a","b"]`.
+  json(): string {
+    return match (this) {
+      Bool(b) => `${b}`,
+      Str(s) => JSON.stringify(s),
+      Int(n) => `${n}`,
+      Num(x) => `${x}`,
+      List(xs) => "[" + xs.map((x: string) => JSON.stringify(x)).join(",") + "]",
+    }
+  }
+
+  /// The value as text: a string as it is, a list joined with `,`.
+  text(): string {
+    return match (this) {
+      Bool(b) => `${b}`,
+      Str(s) => s,
+      Int(n) => `${n}`,
+      Num(x) => `${x}`,
+      List(xs) => xs.join(","),
+    }
+  }
 }
 
 /// What a default, a preset or an implied value can be given as.
@@ -30,31 +52,19 @@ export function toValue(d: Default): Value {
 /// default, or what an earlier occurrence gave). Throw `InvalidArgumentError` to reject it.
 export type Parser = (value: string, previous: Value?) => Value throws Error
 
-/// The value as JSON, as commander's help shows defaults: `"text"`, `true`, `3`, `["a","b"]`.
+/// `v.json()` (kept from 0.1).
 export function jsonValue(v: Value): string {
-  return match (v) {
-    Bool(b) => `${b}`,
-    Str(s) => JSON.stringify(s),
-    Int(n) => `${n}`,
-    Num(x) => `${x}`,
-    List(xs) => "[" + xs.map((x: string) => JSON.stringify(x)).join(",") + "]",
-  }
+  return v.json()
 }
 
 /// Whether `a` and `b` are the same kind of value with the same contents.
 export function sameValue(a: Value, b: Value): bool {
-  return jsonValue(a) == jsonValue(b)
+  return a.json() == b.json()
 }
 
-/// The value as text: a string as it is, a list joined with `,`.
+/// `v.text()` (kept from 0.1).
 export function textValue(v: Value): string {
-  return match (v) {
-    Bool(b) => `${b}`,
-    Str(s) => s,
-    Int(n) => `${n}`,
-    Num(x) => `${x}`,
-    List(xs) => xs.join(","),
-  }
+  return v.text()
 }
 
 /// Whether the value counts as set, as in a JavaScript `if`: `false`, `""` and `0` don't.
@@ -71,30 +81,12 @@ export function truthy(v: Value?): bool {
 
 /// `text` as an integer (decimal, an optional sign), or null.
 export function intFrom(text: string): int? {
-  const t = text.trim()
-  let i = 0
-  let negative = false
-  if (t.startsWith("-") || t.startsWith("+")) {
-    negative = t.startsWith("-")
-    i = 1
-  }
-  if (i >= t.length || t.length - i > 18) return null
-  let n = 0
-  while (i < t.length) {
-    const c = t[i]
-    if (c < '0' || c > '9') return null
-    n = n * 10 + "0123456789".indexOf(c.toString())
-    i++
-  }
-  return if (negative) -n else n
+  return int.parse(text)
 }
 
-/// `text` as a number (JSON's syntax, plus a leading `+`), or null.
+/// `text` as a number (`1.5`, `.5`, `1e3`, …), or null.
 export function numberFrom(text: string): number? {
-  let t = text.trim()
-  if (t.startsWith("+")) t = t.slice(1)
-  if (t == "") return null
-  return try? JSON.parse<number>(t)
+  return number.parse(text)
 }
 
 /// A parser for integer options and arguments: `.option("-p, --port <n>", "port", parser: parseInteger)`.
@@ -215,7 +207,7 @@ export class Values {
     const parts: string[] = []
     for (const n of names) {
       const v = get(n)
-      parts.push(`${n}: ${if (v == null) "null" else jsonValue(v)}`)
+      parts.push(`${n}: ${if (v == null) "null" else v.json()}`)
     }
     return "{ " + parts.join(", ") + " }"
   }

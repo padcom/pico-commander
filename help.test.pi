@@ -164,6 +164,124 @@ AFTER
   })
 })
 
+// commander 14's help groups: `optionsGroup`/`commandsGroup` for what follows, `helpGroup` on
+// one option or command; a group of hidden options only isn't shown.
+function packageManager(colors: bool): Probe {
+  const p = new Probe()
+  const pm = p.program
+  pm.name("pm")
+  pm.configureOutput({
+    writeOut: (s: string) => { p.out += s },
+    writeErr: (s: string) => { p.err += s },
+    getOutHelpWidth: () => 80,
+    getOutHasColors: () => colors,
+  })
+  pm.option("-d, --debug", "debug output")
+  pm.optionsGroup("Network:")
+  pm.option("--host <h>", "host name")
+  pm.addOption(new Option("--port <n>", "port").helpGroup("Network:"))
+  pm.addOption(new Option("--secret", "hidden").hideHelp().helpGroup("Hidden group:"))
+  pm.option("--trace", "trace").helpOption("-h, --help", "show help")
+  pm.commandsGroup("Main:")
+  pm.command("install <pkg>").description("install a package")
+  pm.command("remove").description("remove one").helpGroup("Other:")
+  pm.commandsGroup("Main:")
+  pm.command("list").description("list packages")
+  pm.helpCommand("help [cmd]", "show help for a command")
+  pm.description("A package manager")
+  return p
+}
+
+const GROUPED_HELP = `Usage: pm [options] [command]
+
+A package manager
+
+Options:
+  -d, --debug    debug output
+
+Network:
+  --host <h>     host name
+  --port <n>     port
+  --trace        trace
+  -h, --help     show help
+
+Main:
+  install <pkg>  install a package
+  list           list packages
+  help [cmd]     show help for a command
+
+Other:
+  remove         remove one
+`
+
+const STYLED_HELP = `[Usage:] pm [options] [command]
+
+A PACKAGE MANAGER
+
+[Options:]
+  <-d, --debug>    ~debug output~
+
+[Network:]
+  <--host <h>>     ~host name~
+  <--port <n>>     ~port~
+  <--trace>        ~trace~
+  <-h, --help>     ~show help~
+
+[Main:]
+  {install <pkg>}  ~install a package~
+  {list}           ~list packages~
+  {help [cmd]}     ~show help for a command~
+
+[Other:]
+  {remove}         ~remove one~
+`
+
+function styled(p: Probe): Probe {
+  p.program.configureHelp({
+    styleTitle: (s: string) => `[${s}]`,
+    styleOptionTerm: (s: string) => `<${s}>`,
+    styleSubcommandTerm: (s: string) => `{${s}}`,
+    styleCommandDescription: (s: string) => s.toUpperCase(),
+    styleDescriptionText: (s: string) => `~${s}~`,
+  })
+  return p
+}
+
+describe("help groups and styles", () => {
+  it("lists options and commands in their groups", () => {
+    const p = packageManager(false)
+    expect(p.run(["--help"])).toBe("0 commander.helpDisplayed")
+    expect(p.out).toBe(GROUPED_HELP)
+  })
+
+  it("reads the groups back", () => {
+    const pm = packageManager(false).program
+    expect(pm.optionsGroup()).toBe("Network:")
+    expect(pm.commandsGroup()).toBe("Main:")
+    expect(pm.commands[1].helpGroup()).toBe("Other:")
+  })
+
+  it("styles the help's parts", () => {
+    const p = styled(packageManager(true))
+    p.run(["--help"])
+    expect(p.out).toBe(STYLED_HELP)
+  })
+
+  it("pads by the text's width without colour codes", () => {
+    const p = packageManager(true)
+    p.program.configureHelp({ styleOptionTerm: (s: string) => `\u{1b}[1m${s}\u{1b}[22m` })
+    p.run(["--help"])
+    expect(p.out).toContain("  \u{1b}[1m-d, --debug\u{1b}[22m    debug output\n")
+  })
+
+  it("removes colour codes when the output has no colours", () => {
+    const p = packageManager(false)
+    p.program.configureHelp({ styleTitle: (s: string) => `\u{1b}[1m${s}\u{1b}[22m` })
+    p.run(["--help"])
+    expect(p.out).toBe(GROUPED_HELP)
+  })
+})
+
 describe("version and errors", () => {
   it("-V writes the version", () => {
     const p = new Probe()

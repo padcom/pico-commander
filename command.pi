@@ -1,13 +1,13 @@
 // Command: a program or one of its subcommands, its options and arguments, and the parser.
 // It follows commander.js (v14) closely; README.md lists where it differs.
 
-import { args as processArgs, env, exit, stderr } from "std/process"
+import { args as processArgs, env, exit, stderr, stdout } from "std/process"
 import { Argument, humanReadableArgName } from "./argument"
 import { CommanderError, InvalidArgumentError } from "./errors"
-import { Help, HelpConfiguration } from "./help"
+import { Help, HelpConfiguration, stripColor as stripAnsi } from "./help"
 import { Option } from "./option"
 import { suggestSimilar } from "./suggest"
-import { Default, Parser, Value, Values, sameValue, textValue, toValue } from "./value"
+import { Default, Parser, Value, Values, sameValue, toValue } from "./value"
 
 /// What an action receives: its arguments by name (and in order), its options, the command.
 export type ActionHandler = (args: Values, opts: Values, cmd: Command) => void throws Error
@@ -26,14 +26,32 @@ export struct OutputConfiguration {
   outputError?: (str: string, write: (str: string) => void) => void
   getOutHelpWidth?: () => int
   getErrHelpWidth?: () => int
+  /// Whether stdout (stderr) shows colours: else the help's colour codes are removed. By default
+  /// `NO_COLOR`, `FORCE_COLOR` and `CLICOLOR_FORCE` decide, else whether it's a terminal.
+  getOutHasColors?: () => bool
+  getErrHasColors?: () => bool
+  stripColor?: (str: string) => string
+}
+
+/// Colours by the usual variables (commander's `useColor`): `NO_COLOR` or `FORCE_COLOR=0`/`false`
+/// turn them off, `FORCE_COLOR` or `CLICOLOR_FORCE` on; `null`: neither.
+function useColor(): bool? {
+  const force = env.get("FORCE_COLOR")
+  if ((env.get("NO_COLOR") ?? "") != "" || force == "0" || force == "false") return false
+  if ((force ?? "") != "" || env.has("CLICOLOR_FORCE")) return true
+  return null
 }
 
 class Output {
   public writeOut: (str: string) => void = (str: string) => print(str)
   public writeErr: (str: string) => void = (str: string) => writeStderr(str)
   public outputError: (str: string, write: (str: string) => void) => void = (str: string, write: (str: string) => void) => write(str)
-  public getOutHelpWidth: () => int = () => 80
-  public getErrHelpWidth: () => int = () => 80
+  // (The terminal's width, as commander's `process.stdout.columns`; 80 when it isn't one.)
+  public getOutHelpWidth: () => int = () => stdout.columns ?? 80
+  public getErrHelpWidth: () => int = () => stderr.columns ?? 80
+  public getOutHasColors: () => bool = () => useColor() ?? stdout.isTerminal
+  public getErrHasColors: () => bool = () => useColor() ?? stderr.isTerminal
+  public stripColor: (str: string) => string = (str: string) => stripAnsi(str)
 
   public copy(): Output {
     const o = new Output()
@@ -42,13 +60,15 @@ class Output {
     o.outputError = outputError
     o.getOutHelpWidth = getOutHelpWidth
     o.getErrHelpWidth = getErrHelpWidth
+    o.getOutHasColors = getOutHasColors
+    o.getErrHasColors = getErrHasColors
+    o.stripColor = stripColor
     return o
   }
 }
 
 function writeStderr(str: string): void {
-  // Writes are in order with `print`, and done before `exit` ends the process.
-  stderr.writeText(str).catch((_: Error) => 0)
+  eprint(str)
 }
 
 /// A hook or an action, ready to run.
@@ -95,7 +115,14 @@ class HookEntry {
 }
 
 class HelpText {
-  constructor(public position: string, public text: string) {}
+  constructor(public position: string, public text: string, public fn: ((context: AddHelpTextContext) => string)? = null) {}
+}
+
+/// What a function given to `addHelpText` gets: whether the help is for an error (written to
+/// stderr) and the command whose help it is.
+export struct AddHelpTextContext {
+  error: bool
+  command: Command
 }
 
 /// How `command` and `addCommand` add a subcommand: `{ isDefault: true }` runs it when no
@@ -164,6 +191,11 @@ export class Command {
   /// null: a help command when there are subcommands and no action.
   private addImplicitHelpCommand: bool? = null
   private hooks: HookEntry[] = []
+  /// The heading this command is listed under in its parent's help (commander 14).
+  private groupHeading: string? = null
+  /// The headings new options and subcommands get (`optionsGroup`, `commandsGroup`).
+  private defaultOptionGroup: string? = null
+  private defaultCommandGroup: string? = null
   private helpTexts: HelpText[] = []
 
   constructor(name: string = "") {
@@ -225,6 +257,12 @@ export class Command {
     if (outWidth != null) o.getOutHelpWidth = outWidth
     const errWidth = config.getErrHelpWidth
     if (errWidth != null) o.getErrHelpWidth = errWidth
+    const outColors = config.getOutHasColors
+    if (outColors != null) o.getOutHasColors = outColors
+    const errColors = config.getErrHasColors
+    if (errColors != null) o.getErrHasColors = errColors
+    const strip = config.stripColor
+    if (strip != null) o.stripColor = strip
     output = o
     return this
   }
@@ -283,7 +321,61 @@ export class Command {
   /// Turns the help command off (`false`), or adds it even without subcommands (`true`).
   public helpCommand(enabled: bool): Command {
     addImplicitHelpCommand = enabled
+    if (enabled && defaultCommandGroup != null) {
+      // (Made now, to hold the group.)
+      const hc = getHelpCommand()
+      if (hc != null) initCommandGroup(hc)
+    }
     return this
+  }
+
+  /// A help command of your own.
+  public addHelpCommand(cmd: Command): Command {
+    addImplicitHelpCommand = true
+    helpCommandValue = cmd
+    initCommandGroup(cmd)
+    return this
+  }
+
+  /// Lists this command under `heading` in its parent's help (`"Development Commands:"`).
+  public helpGroup(heading: string): Command {
+    groupHeading = heading
+    return this
+  }
+
+  /// The heading the command is listed under ("" for the default, "Commands:").
+  public helpGroup(): string {
+    return groupHeading ?? ""
+  }
+
+  /// The heading for the subcommands added from now on (not those given one of their own).
+  public commandsGroup(heading: string): Command {
+    defaultCommandGroup = heading
+    return this
+  }
+
+  public commandsGroup(): string {
+    return defaultCommandGroup ?? ""
+  }
+
+  /// The heading for the options added from now on (not those given one of their own).
+  public optionsGroup(heading: string): Command {
+    defaultOptionGroup = heading
+    return this
+  }
+
+  public optionsGroup(): string {
+    return defaultOptionGroup ?? ""
+  }
+
+  private initOptionGroup(option: Option): void {
+    const g = defaultOptionGroup
+    if (g != null && option.helpGroupHeading == null) option.helpGroup(g)
+  }
+
+  private initCommandGroup(cmd: Command): void {
+    const g = defaultCommandGroup
+    if (g != null && cmd.helpGroup() == "") cmd.helpGroup(g)
   }
 
   /// The help command's name, arguments and description (`help [command]`).
@@ -296,6 +388,7 @@ export class Command {
     if (space >= 0) cmd.arguments(trimmed.slice(space + 1))
     if (description != "") cmd.description(description)
     helpCommandValue = cmd
+    initCommandGroup(cmd)
     return this
   }
 
@@ -318,7 +411,13 @@ export class Command {
     return this
   }
 
-  /// `hook` for an async function; it needs `parseAsync`.
+  /// `hook` with an async function (`async (thisCommand, actionCommand) => …`); it needs
+  /// `parseAsync`.
+  public hook(event: string, fn: AsyncHook): Command {
+    return hookAsync(event, fn)
+  }
+
+  /// `hook` for an async function (kept from 0.1: `hook` takes either now).
   public hookAsync(event: string, fn: AsyncHook): Command {
     checkHookEvent(event)
     hooks.push(new HookEntry(event, null, fn))
@@ -347,7 +446,12 @@ export class Command {
     return this
   }
 
-  /// `action` for an async function; it needs `parseAsync`.
+  /// `action` with an async function (`async (args, opts, cmd) => …`); it needs `parseAsync`.
+  public action(fn: AsyncActionHandler): Command {
+    return actionAsync(fn)
+  }
+
+  /// `action` for an async function (kept from 0.1: `action` takes either now).
   public actionAsync(fn: AsyncActionHandler): Command {
     actionAsync_ = fn
     actionSync = null
@@ -418,7 +522,9 @@ export class Command {
   /// The help option's flags and description.
   public helpOption(flags: string, description: string = "display help for command"): Command {
     helpOptionDisabled = false
-    helpOptionValue = createOption(flags, description)
+    const o = createOption(flags, description)
+    helpOptionValue = o
+    initOptionGroup(o)
     return this
   }
 
@@ -426,6 +532,19 @@ export class Command {
   public helpOption(enabled: bool): Command {
     helpOptionDisabled = !enabled
     helpOptionValue = null
+    if (enabled && defaultOptionGroup != null) {
+      // (Made now, to hold the group.)
+      const o = getHelpOption()
+      if (o != null) initOptionGroup(o)
+    }
+    return this
+  }
+
+  /// A help option of your own.
+  public addHelpOption(option: Option): Command {
+    helpOptionDisabled = false
+    helpOptionValue = option
+    initOptionGroup(option)
     return this
   }
 
@@ -438,10 +557,15 @@ export class Command {
 
   /// Adds text to the help: `beforeAll` and `afterAll` (also in subcommands' help), `before`, `after`.
   public addHelpText(position: string, text: string): Command {
-    if (position != "beforeAll" && position != "before" && position != "after" && position != "afterAll") {
-      panic(`Unexpected value for position to addHelpText.\nExpecting one of 'beforeAll', 'before', 'after', 'afterAll'`)
-    }
+    checkHelpTextPosition(position)
     helpTexts.push(new HelpText(position, text))
+    return this
+  }
+
+  /// `addHelpText` with a function that gives the text, when the help is written.
+  public addHelpText(position: string, fn: (context: AddHelpTextContext) => string): Command {
+    checkHelpTextPosition(position)
+    helpTexts.push(new HelpText(position, "", fn))
     return this
   }
 
@@ -798,7 +922,14 @@ export class Command {
   private helpText(error: bool): string {
     const helper = createHelp()
     const getWidth = if (error) output.getErrHelpWidth else output.getOutHelpWidth
-    return helper.formatHelp(this, getWidth())
+    const text = helper.formatHelp(this, getWidth())
+    const strip = output.stripColor
+    return if (hasColors(error)) text else strip(text)
+  }
+
+  private hasColors(error: bool): bool {
+    const f = if (error) output.getErrHasColors else output.getOutHasColors
+    return f()
   }
 
   /// Writes the help and goes on.
@@ -812,13 +943,17 @@ export class Command {
   }
 
   private writeHelp(error: bool): void {
-    const write = if (error) output.writeErr else output.writeOut
+    const base = if (error) output.writeErr else output.writeOut
+    // (Help texts lose their colours too when the output has none.)
+    const colors = hasColors(error)
+    const strip = output.stripColor
+    const write = (str: string) => base(if (colors) str else strip(str))
     const chain = commandAndAncestors()
-    for (let i = chain.length - 1; i >= 0; i--) chain[i].writeHelpTexts("beforeAll", write)
-    writeHelpTexts("before", write)
+    for (let i = chain.length - 1; i >= 0; i--) chain[i].writeHelpTexts("beforeAll", write, error, this)
+    writeHelpTexts("before", write, error, this)
     write(helpText(error))
-    writeHelpTexts("after", write)
-    for (const c of chain) c.writeHelpTexts("afterAll", write)
+    writeHelpTexts("after", write, error, this)
+    for (const c of chain) c.writeHelpTexts("afterAll", write, error, this)
   }
 
   /// Writes the help and exits.
@@ -891,9 +1026,19 @@ export class Command {
     return out
   }
 
-  private writeHelpTexts(position: string, write: (str: string) => void): void {
+  private writeHelpTexts(position: string, write: (str: string) => void, error: bool, command: Command): void {
     for (const t of helpTexts) {
-      if (t.position == position) write(`${t.text}\n`)
+      if (t.position != position) continue
+      const fn = t.fn
+      // (Commander writes the text only when it isn't empty.)
+      const text = if (fn != null) fn({ error, command }) else t.text
+      if (text != "") write(`${text}\n`)
+    }
+  }
+
+  private checkHelpTextPosition(position: string): void {
+    if (position != "beforeAll" && position != "before" && position != "after" && position != "afterAll") {
+      panic(`Unexpected value for position to addHelpText.\nExpecting one of 'beforeAll', 'before', 'after', 'afterAll'`)
     }
   }
 
@@ -917,6 +1062,7 @@ export class Command {
     if (clash != null) {
       panic(`cannot add command '${cmd.cmdName}' as already have command '${clash.cmdName}'`)
     }
+    initCommandGroup(cmd)
     commands.push(cmd)
   }
 
@@ -930,6 +1076,7 @@ export class Command {
       const flag = if (l != null && clash.long == l) l else s ?? ""
       panic(`Cannot add option '${option.flags}'${if (cmdName != "") ` to command '${cmdName}'` else ""} due to conflicting flag '${flag}'\n-  already used by option '${clash.flags}'`)
     }
+    initOptionGroup(option)
     options.push(option)
   }
 
@@ -998,7 +1145,7 @@ export class Command {
     } else if (value != null) {
       const parser = option.parseArg
       if (parser != null || option.argChoices != null) {
-        const message = `error: option '${option.flags}' argument '${textValue(value)}' is invalid.`
+        const message = `error: option '${option.flags}' argument '${value.text()}' is invalid.`
         value = callParseArg(parser, option.argChoices, value, old, message)
       } else if (option.variadic && given != null) {
         if (old is Value.List(items) && oldSource != "default") {
@@ -1013,7 +1160,7 @@ export class Command {
   }
 
   private callParseArg(parser: Parser?, choices: string[]?, value: Value, previous: Value?, invalidMessage: string): Value throws Error {
-    const text = textValue(value)
+    const text = value.text()
     if (choices != null && !choices.includes(text)) {
       fail(`${invalidMessage} Allowed choices are ${choices.join(", ")}.`, 1, "commander.invalidArgument")
     }

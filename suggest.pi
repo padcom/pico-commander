@@ -1,6 +1,6 @@
 // "(Did you mean …?)" for a mistyped command or option, as commander does it.
 
-import { imax, imin, localeCompare } from "./util"
+import { imax, imin } from "./util"
 
 /// The Damerau-Levenshtein distance (optimal string alignment) between `a` and `b`.
 export function editDistance(a: string, b: string): int {
@@ -47,7 +47,7 @@ export function suggestSimilar(word: string, candidates: string[]): string {
       }
     }
   }
-  similar.sort(localeCompare)
+  similar.sort((a: string, b: string) => a.localeCompare(b))
   if (searchingOptions) similar = similar.map((c: string) => `--${c}`)
   if (similar.length > 1) return `\n(Did you mean one of ${similar.join(", ")}?)`
   if (similar.length == 1) return `\n(Did you mean ${similar[0]}?)`

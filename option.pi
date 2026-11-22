@@ -28,6 +28,8 @@ export class Option {
   public argChoices: string[]? = null
   public conflictsWith: string[] = []
   public implied: Map<string, Value>? = null
+  /// The heading the option is listed under in the help (commander 14), else "Options:".
+  public helpGroupHeading: string? = null
 
   constructor(flags: string, description: string = "") {
     this.flags = flags
@@ -84,6 +86,12 @@ export class Option {
   /// Makes the option required: the parse fails when it has no value.
   public makeOptionMandatory(mandatory: bool = true): Option {
     this.mandatory = mandatory
+    return this
+  }
+
+  /// Lists the option under `heading` in the help (`"Development Options:"`).
+  public helpGroup(heading: string): Option {
+    helpGroupHeading = heading
     return this
   }
 
