@@ -27,7 +27,7 @@ program
     for (const t of opts.strings("toppings")) println(`  + ${t}`)
     const minutes = opts.int("deliveryTime")
     if (minutes != null) println(`  delivered in ${minutes} minutes`)
-    if ((opts.int("verbose") ?? 0) > 0) println(`options: ${opts}`)
+    if ((opts.int("verbose") ?? 0) > 0) println(`options: ${opts.json()}`)
   })
 
 program.parse()

@@ -153,7 +153,8 @@ await program.parseAsync()
 `parse()` runs actions and hooks as it goes. `action` and `hook` also take an async function or lambda (one that
 returns a `Promise`); those need `parseAsync()`, which validates the whole command line and then runs the hooks and
 actions in order, each awaited; a subcommand is parsed after its `preSubcommand` hooks have finished, so they can change
-it. (`actionAsync`/`hookAsync` are the same, for 0.1 programs.)
+it. (`actionAsync`/`hookAsync` are the same, for 0.1 programs.) See examples/deploy.pi, which also shows help groups,
+styles and `exitOverride()`.
 
 **What `parse` reads**: with no arguments, the program's (`args` in `std/process`), and the program is named after its
 executable (`nameFromFilename(argv0)`; under `pico run --interp`, its entry file) unless it has a name. An array is the
@@ -225,6 +226,7 @@ Most come from Pico being statically typed, with no `any` or `undefined`:
 pico fmt --check . && pico lint . && pico test .
 pico run examples/string-util.pi -- --help
 pico run examples/pizza.pi -- -p hawaiian -c blue -vv
+pico run examples/deploy.pi -- up staging --host example.com -v
 pico build examples/pm.pi -o bin/pm && pico build examples/pm-install.pi -o bin/pm-install && bin/pm install a
 ```
 

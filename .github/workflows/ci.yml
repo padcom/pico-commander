@@ -65,6 +65,15 @@ jobs:
           pico build examples/string-util.pi -o "$RUNNER_TEMP/string-util$ext"
           pico build examples/pizza.pi -o "$RUNNER_TEMP/pizza$ext"
           "$RUNNER_TEMP/string-util$ext" split -s / a/b/c
+      - name: Async actions and exitOverride
+        run: |
+          ext=${{ startsWith(matrix.target, 'windows') && '.exe' || '' }}
+          pico build examples/deploy.pi -o "$RUNNER_TEMP/deploy$ext"
+          out=$("$RUNNER_TEMP/deploy$ext" rollback production r41 --dry-run)
+          echo "$out"
+          [ "$out" = "$(printf 'rolling production back to r41\n  would switch\n  would restart')" ]
+          code=0; "$RUNNER_TEMP/deploy$ext" up qa || code=$?
+          [ "$code" = 1 ]
       - name: An executable subcommand runs
         run: |
           ext=${{ startsWith(matrix.target, 'windows') && '.exe' || '' }}

@@ -1,0 +1,91 @@
+// Help groups and styles, async actions and hooks with parseAsync, and exitOverride.
+//
+//   pico run examples/deploy.pi -- --help
+//   pico run examples/deploy.pi -- up staging --host example.com -v
+//   pico run examples/deploy.pi -- rollback production r41 --dry-run
+//   pico run examples/deploy.pi -- up qa
+import { exit } from "std/process"
+import { delay } from "std/timers"
+import { Argument, Command, CommanderError, Option, parseInteger } from "../index"
+
+const bold = (s: string): string => `\u{1b}[1m${s}\u{1b}[22m`
+const cyan = (s: string): string => `\u{1b}[36m${s}\u{1b}[39m`
+
+const program = new Command()
+
+program
+  .name("deploy")
+  .description("Deploy an app to an environment")
+  .version("2.1.0")
+  .configureHelp({ styleTitle: bold, styleOptionTerm: cyan, styleSubcommandTerm: cyan, styleArgumentTerm: cyan })
+  .showHelpAfterError("(add --help for additional information)")
+  .exitOverride()
+  .option("-v, --verbose", "say what is happening")
+  .option("--dry-run", "show the steps without running them")
+  .optionsGroup("Connection:")
+  .option("--host <host>", "server to deploy to", "localhost")
+  .option("--port <n>", "its SSH port", parseInteger, 22)
+  .addOption(new Option("--token <token>", "access token").env("DEPLOY_TOKEN"))
+  .hook("preAction", async (_program, action) => {
+    const opts = action.optsWithGlobals()
+    if (opts.bool("verbose")) println(`connecting to ${opts.string("host") ?? ""}:${opts.int("port") ?? 22}`)
+    await delay(10)
+  })
+  .hook("postAction", (_program, action) => {
+    if (action.optsWithGlobals().bool("verbose")) println("disconnected")
+  })
+  .addHelpText("after", (ctx) => if (ctx.error) "" else "\nExamples:\n  $ deploy up staging --host example.com\n  $ deploy rollback production r41")
+
+const environment = new Argument("<env>", "where to deploy").choices(["staging", "production"])
+
+async function run(steps: string[], dryRun: bool): Promise<void> throws Error {
+  for (const step of steps) {
+    if (dryRun) {
+      println(`  would ${step}`)
+      continue
+    }
+    await delay(10)
+    println(`  ${step}`)
+  }
+}
+
+program.commandsGroup("Deployment:")
+
+program.command("up")
+  .description("deploy the current release")
+  .addArgument(environment)
+  .action(async (args, _opts, cmd) => {
+    const env = args.string("env") ?? ""
+    println(`deploying to ${env}`)
+    await run(["upload", "migrate", "restart"], cmd.optsWithGlobals().bool("dryRun"))
+  })
+
+program.command("rollback")
+  .description("go back to an earlier release")
+  .addArgument(environment)
+  .argument("[release]", "the release to go back to", "previous")
+  .action(async (args, _opts, cmd) => {
+    println(`rolling ${args.string("env") ?? ""} back to ${args.string("release") ?? ""}`)
+    await run(["switch", "restart"], cmd.optsWithGlobals().bool("dryRun"))
+  })
+
+program.commandsGroup("Inspection:")
+
+program.command("status")
+  .description("show what is deployed where")
+  .action((_args, _opts, _cmd) => {
+    println("staging     r42")
+    println("production  r41")
+  })
+
+// With exitOverride, --help, --version and errors end in a CommanderError (help and errors are
+// already written): its exitCode is commander's (0 for --help and --version, 1 for errors).
+async function main(): Promise<void> throws Error {
+  try {
+    await program.parseAsync()
+  } catch (e: CommanderError) {
+    exit(e.exitCode as i32)
+  }
+}
+
+await main()
