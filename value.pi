@@ -79,26 +79,16 @@ export function truthy(v: Value?): bool {
   }
 }
 
-/// `text` as an integer (decimal, an optional sign), or null.
-export function intFrom(text: string): int? {
-  return int.parse(text)
-}
-
-/// `text` as a number (`1.5`, `.5`, `1e3`, …), or null.
-export function numberFrom(text: string): number? {
-  return number.parse(text)
-}
-
 /// A parser for integer options and arguments: `.option("-p, --port <n>", "port", parser: parseInteger)`.
 export function parseInteger(value: string, _previous: Value?): Value throws Error {
-  const n = intFrom(value)
+  const n = int.parse(value)
   if (n == null) throw new InvalidArgumentError("Not an integer.")
   return Value.Int(n)
 }
 
 /// A parser for number options and arguments (`1.5`, `-2`, `1e3`).
 export function parseNumber(value: string, _previous: Value?): Value throws Error {
-  const x = numberFrom(value)
+  const x = number.parse(value)
   if (x == null) throw new InvalidArgumentError("Not a number.")
   return Value.Num(x)
 }
@@ -249,7 +239,7 @@ function asInt(v: Value?): int? {
   if (v == null) return null
   return match (v) {
     Int(n) => n,
-    Str(s) => intFrom(s),
+    Str(s) => int.parse(s),
     _ => null,
   }
 }
@@ -259,7 +249,7 @@ function asNumber(v: Value?): number? {
   return match (v) {
     Num(x) => x,
     Int(n) => n as number,
-    Str(s) => numberFrom(s),
+    Str(s) => number.parse(s),
     _ => null,
   }
 }

@@ -1,10 +1,11 @@
 // Help: how commander lays out a command's help. Its methods are virtual, so a subclass can
 // change a part (`Command.configureHelp` sets the simple settings).
 
+import { wrap } from "std/fmt"
+import { displayWidth as columns, stripAnsi } from "std/term"
 import { Argument, humanReadableArgName } from "./argument"
 import { Command } from "./command"
 import { Option } from "./option"
-import { imax } from "./util"
 import { Value } from "./value"
 
 /// The settings `Command.configureHelp` takes.
@@ -143,9 +144,10 @@ export class Help {
     return styled(config?.styleCommandText, str)
   }
 
-  /// How wide `str` shows: without its ANSI colour codes.
+  /// How wide `str` shows: the terminal columns it takes (colour codes take none, wide
+  /// characters two).
   public virtual displayWidth(str: string): int {
-    return stripColor(str).length
+    return columns(str)
   }
 
   /// The items in groups (commander 14's `groupItems`): the groups in the order they first
@@ -241,25 +243,25 @@ export class Help {
 
   public virtual longestSubcommandTermLength(cmd: Command): int {
     let n = 0
-    for (const c of visibleCommands(cmd)) n = imax(n, displayWidth(styleSubcommandTerm(subcommandTerm(c))))
+    for (const c of visibleCommands(cmd)) n = Math.max(n, displayWidth(styleSubcommandTerm(subcommandTerm(c))))
     return n
   }
 
   public virtual longestOptionTermLength(cmd: Command): int {
     let n = 0
-    for (const o of visibleOptions(cmd)) n = imax(n, displayWidth(styleOptionTerm(optionTerm(o))))
+    for (const o of visibleOptions(cmd)) n = Math.max(n, displayWidth(styleOptionTerm(optionTerm(o))))
     return n
   }
 
   public virtual longestGlobalOptionTermLength(cmd: Command): int {
     let n = 0
-    for (const o of visibleGlobalOptions(cmd)) n = imax(n, displayWidth(styleOptionTerm(optionTerm(o))))
+    for (const o of visibleGlobalOptions(cmd)) n = Math.max(n, displayWidth(styleOptionTerm(optionTerm(o))))
     return n
   }
 
   public virtual longestArgumentTermLength(cmd: Command): int {
     let n = 0
-    for (const a of visibleArguments(cmd)) n = imax(n, displayWidth(styleArgumentTerm(argumentTerm(a))))
+    for (const a of visibleArguments(cmd)) n = Math.max(n, displayWidth(styleArgumentTerm(argumentTerm(a))))
     return n
   }
 
@@ -322,8 +324,8 @@ export class Help {
 
   /// The width of the term column: the longest term of every list.
   public virtual padWidth(cmd: Command): int {
-    return imax(imax(longestOptionTermLength(cmd), longestGlobalOptionTermLength(cmd)),
-      imax(longestSubcommandTermLength(cmd), longestArgumentTermLength(cmd)))
+    return Math.max(longestOptionTermLength(cmd), longestGlobalOptionTermLength(cmd),
+      longestSubcommandTermLength(cmd), longestArgumentTermLength(cmd))
   }
 
   /// Whether `str` is laid out already (a line break followed by a space or a tab): it isn't wrapped.
@@ -342,7 +344,7 @@ export class Help {
       formatted = boxWrap(description, remainingWidth).replaceAll("\n", "\n" + " ".repeat(termWidth + spacerWidth))
     }
     // (Padded by how wide the term shows: colour codes take no room.)
-    const padded = term + " ".repeat(imax(0, termWidth - displayWidth(term)))
+    const padded = term + " ".repeat(Math.max(0, termWidth - displayWidth(term)))
     return itemIndent + padded + " ".repeat(spacerWidth) + formatted.replaceAll("\n", "\n" + itemIndent)
   }
 
@@ -356,30 +358,7 @@ export class Help {
   /// `minWidthToWrap` leaves it as it is.
   public virtual boxWrap(str: string, width: int): string {
     if (width < minWidthToWrap) return str
-    const wrapped: string[] = []
-    for (const line of str.replaceAll("\r\n", "\n").split("\n")) {
-      const chunks = splitChunks(line)
-      if (chunks.length == 0) {
-        wrapped.push("")
-        continue
-      }
-      let sum = chunks[0]
-      let sumWidth = displayWidth(sum)
-      for (let i = 1; i < chunks.length; i++) {
-        const chunk = chunks[i]
-        const w = displayWidth(chunk)
-        if (sumWidth + w <= width) {
-          sum += chunk
-          sumWidth += w
-        } else {
-          wrapped.push(sum)
-          sum = chunk.trimStart()
-          sumWidth = displayWidth(sum)
-        }
-      }
-      wrapped.push(sum)
-    }
-    return wrapped.join("\n")
+    return wrap(str, width, (s: string) => displayWidth(s))
   }
 
   /// Called before `formatHelp` with the output's width and whether it has colours (and is
@@ -430,45 +409,9 @@ export class Help {
   }
 }
 
-/// `str` without ANSI colour codes (`ESC [ … m`), as commander's `stripColor`.
+/// `str` without ANSI colour codes, as commander's `stripColor` (`std/term`'s `stripAnsi`).
 export function stripColor(str: string): string {
-  if (!str.includes("\u{1b}")) return str
-  let out = ""
-  let i = 0
-  while (i < str.length) {
-    if (str[i] == '\u{1b}' && i + 1 < str.length && str[i + 1] == '[') {
-      let j = i + 2
-      while (j < str.length && ((str[j] >= '0' && str[j] <= '9') || str[j] == ';')) {
-        j += 1
-      }
-      if (j < str.length && str[j] == 'm') {
-        i = j + 1
-        continue
-      }
-    }
-    out += str[i].toString()
-    i += 1
-  }
-  return out
-}
-
-/// `line` as runs of whitespace each followed by a word (`"a  b"` is `"a"`, `"  b"`); trailing
-/// whitespace is dropped.
-function splitChunks(line: string): string[] {
-  const chunks: string[] = []
-  let current = ""
-  let inWord = false
-  for (const c of line) {
-    const space = c == ' ' || c == '\t'
-    if (space && inWord) {
-      chunks.push(current)
-      current = ""
-    }
-    inWord = !space
-    current += c.toString()
-  }
-  if (inWord) chunks.push(current)
-  return chunks
+  return stripAnsi(str)
 }
 
 function sortKey(o: Option): string {

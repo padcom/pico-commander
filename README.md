@@ -5,7 +5,9 @@ subcommands and generated help for command-line programs. It follows commander 1
 it, and the same parsing, error messages, exit codes and help layout (checked against commander.js 14.0.3 on the same
 programs). It is plain Pico, with no native code, so it runs on every platform Pico does.
 
-It needs Pico 0.8.0 or later (`argv0` and `execPath()` for the program's name and executable subcommands).
+It needs Pico 0.9.0 or later: `argv0` and `execPath()` for the program's name and executable subcommands (0.8.0), and the
+standard library's `std/text`, `std/term`, `wrap` and `hasColors()`, which it uses for suggestions, help layout and colours
+(0.9.0).
 
 ## Use
 
@@ -198,8 +200,9 @@ styleCommandDescription, styleDescriptionText, … })` take a function of the te
 program.configureHelp({ styleTitle: (s: string) => `\u{1b}[1m${s}\u{1b}[22m` })
 ```
 
-Columns line up by the text's width without colour codes, and the codes are removed when the output has no colours:
-`NO_COLOR`, `FORCE_COLOR` and `CLICOLOR_FORCE` decide, else whether it's a terminal (`getOutHasColors` overrides).
+Columns line up by the columns the text takes in a terminal (`std/term`'s `displayWidth`: colour codes take none, East
+Asian wide characters two), and the codes are removed when the output has no colours: `Writer.hasColors()` decides
+(`NO_COLOR`, `FORCE_COLOR` and `CLICOLOR_FORCE`, else whether it's a terminal; `getOutHasColors` overrides).
 
 `Help`'s methods are virtual (except the generic `groupItems`): override `createHelp()` in a `Command` subclass for a
 layout of your own. As in commander 14, `prepareContext({ error, helpWidth, outputHasColors })` is called first, then

@@ -1,5 +1,6 @@
 // Option: a flag such as `-p, --pizza-type <type>`, and what it takes.
 
+import { camelCase } from "std/text"
 import { Default, Parser, Value, toValue } from "./value"
 
 /// An option of a command. Most programs make them with `Command.option`; `new Option`
@@ -117,7 +118,7 @@ export class Option {
   /// The key of the option's value: `pizzaType` (`--no-sauce` is `sauce`).
   public attributeName(): string {
     const n = name()
-    return camelcase(if (n.startsWith("no-")) n.slice(3) else n)
+    return camelCase(if (n.startsWith("no-")) n.slice(3) else n, "-")
   }
 
   /// Whether `arg` is one of the option's flags.
@@ -129,17 +130,6 @@ export class Option {
   public isBoolean(): bool {
     return !required && !optional && !negate
   }
-}
-
-/// `pizza-type` → `pizzaType`.
-export function camelcase(s: string): string {
-  const words = s.split("-")
-  let out = words[0]
-  for (let i = 1; i < words.length; i++) {
-    const w = words[i]
-    out += if (w == "") "" else w.slice(0, 1).toUpperCase() + w.slice(1)
-  }
-  return out
 }
 
 function isShortFlag(s: string): bool {
