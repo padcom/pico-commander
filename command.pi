@@ -1,7 +1,11 @@
 // Command: a program or one of its subcommands, its options and arguments, and the parser.
 // It follows commander.js (v14) closely; README.md lists where it differs.
 
-import { args as processArgs, env, exit, stderr, stdout } from "std/process"
+import { stat } from "std/fs"
+import {
+  Command as Process, ProcessError, args as processArgs, argv0, env, execPath, exit, stderr, stdout,
+} from "std/process"
+import { basename, dirname, extname, resolve } from "std/path"
 import { Argument, humanReadableArgName } from "./argument"
 import { CommanderError, InvalidArgumentError } from "./errors"
 import { Help, HelpConfiguration, stripColor as stripAnsi } from "./help"
@@ -82,6 +86,25 @@ class Step {
   }
 }
 
+/// A command's state before its first parse, which later parses start from.
+class SavedState {
+  public name: string
+  public values: Map<string, Value>
+  public sources: Map<string, string>
+
+  constructor(name: string, values: Map<string, Value>, sources: Map<string, string>) {
+    this.name = name
+    this.values = values
+    this.sources = sources
+  }
+}
+
+function copyMap<V>(m: Map<string, V>): Map<string, V> {
+  const out = new Map<string, V>()
+  for (const [k, v] of m) out.set(k, v)
+  return out
+}
+
 /// Runs the steps of a parse: at once for `parse`, after it for `parseAsync`.
 class Runner {
   public deferred: bool
@@ -130,6 +153,8 @@ export struct AddHelpTextContext {
 export struct CommandOptions {
   isDefault?: bool
   hidden?: bool
+  /// An executable subcommand's program (by default `<program>-<subcommand>`).
+  executableFile?: string
 }
 
 /// The exit code and the code (`commander.…`) of an error reported with `Command.error`.
@@ -141,6 +166,13 @@ export struct ErrorOptions {
 /// Whether help is written as for an error (to stderr, exit code 1): `help({ error: true })`.
 export struct HelpContext {
   error?: bool
+}
+
+/// Where `parse`'s arguments come from (commander's `from`): `"user"`, the arguments alone;
+/// `"node"`, a runtime and a script first (`["node", "app.js", …]`, the script names the
+/// program); `"electron"`, a packaged app first.
+export struct ParseOptions {
+  from?: "node" | "electron" | "user"
 }
 
 /// A parsed command line: the operands and what wasn't recognised (from the first unknown
@@ -159,6 +191,16 @@ export class Command {
   public args: string[] = []
   /// The arguments as the action gets them (after `parse`).
   public processedArgs: Values = new Values()
+  /// The arguments `parse` got, as given.
+  public rawArgs: string[] = []
+
+  private executableHandler: bool = false
+  private executableFileName: string? = null
+  private executableDirPath: string? = null
+  private scriptPath: string? = null
+  private savedState: SavedState? = null
+  /// The script's (or program's) file with symlinks resolved, for executable subcommands.
+  private scriptFile: string? = null
 
   private cmdName: string
   private aliasNames: string[] = []
@@ -208,6 +250,18 @@ export class Command {
   /// this command's settings as they are now.
   public command(nameAndArgs: string): Command {
     return command(nameAndArgs, {})
+  }
+
+  /// An executable subcommand (commander's `command(name, description)`): it runs the program
+  /// `<program>-<name>` (or `opts.executableFile`) with the rest of the command line, found in
+  /// `executableDir()` (relative to the program's directory) or else in `PATH`, and this
+  /// program exits with its exit code. Returns this command, for adding more.
+  public command(nameAndArgs: string, description: string, opts: CommandOptions = {}): Command {
+    const cmd = command(nameAndArgs, opts)
+    cmd.description(description)
+    cmd.executableHandler = true
+    cmd.executableFileName = opts.executableFile
+    return this
   }
 
   /// `command` with `{ isDefault, hidden }`.
@@ -576,6 +630,24 @@ export class Command {
     return this
   }
 
+  /// Where executable subcommands are looked for: relative to the program's directory (or, with
+  /// `from: "node"`, its script's).
+  public executableDir(path: string): Command {
+    executableDirPath = path
+    return this
+  }
+
+  public executableDir(): string? {
+    return executableDirPath
+  }
+
+  /// Names the command after a file: its base name without the extension (`nameFromFilename(
+  /// "bin/pm.js")` is `pm`).
+  public nameFromFilename(filename: string): Command {
+    cmdName = basename(filename, extname(filename))
+    return this
+  }
+
   public name(): string {
     return cmdName
   }
@@ -773,17 +845,26 @@ export class Command {
 
   /// Parses the command line (default: the program's arguments) and runs the actions. Errors in
   /// it are written and end the process, unless `exitOverride` makes them a `CommanderError`.
-  public parse(argv: string[]? = null): Command throws Error {
+  ///
+  /// Without `argv`, the program's arguments. `argv` is the arguments alone unless
+  /// `parseOptions.from` says otherwise (commander's default for an array is `"node"`; a pico
+  /// program's arguments don't start with a runtime).
+  public parse(argv: string[]? = null, parseOptions: ParseOptions? = null): Command throws Error {
+    prepareForParse()
     const runner = new Runner(false)
-    parseCommand([], prepareUserArgs(argv), runner)
+    parseCommand([], prepareUserArgs(argv, parseOptions), runner)
     return this
   }
 
-  /// `parse` for async actions and hooks: they run, one after the other, after the parse.
-  public async parseAsync(argv: string[]? = null): Promise<Command> throws Error {
+  /// `parse` for async actions and hooks: each is awaited before the parse goes on (a
+  /// subcommand is parsed after its `preSubcommand` hooks, its action after `preAction`).
+  public async parseAsync(argv: string[]? = null, parseOptions: ParseOptions? = null): Promise<Command> throws Error {
+    prepareForParse()
     const runner = new Runner(true)
-    parseCommand([], prepareUserArgs(argv), runner)
-    for (const step of runner.steps) {
+    parseCommand([], prepareUserArgs(argv, parseOptions), runner)
+    // (A step can add more: a subcommand's parse after its `preSubcommand` hooks.)
+    for (let i = 0; i < runner.steps.length; i++) {
+      const step = runner.steps[i]
       const s = step.sync
       const a = step.async_
       if (s != null) {
@@ -793,6 +874,35 @@ export class Command {
       }
     }
     return this
+  }
+
+  /// Keeps the state a later parse starts from (the name, the option values and their
+  /// sources: the defaults); `parse` calls it the first time. A subclass can keep more.
+  public virtual saveStateBeforeParse(): void {
+    savedState = new SavedState(cmdName, copyMap(optionValues), copyMap(optionValueSources))
+  }
+
+  /// Goes back to the state `saveStateBeforeParse` kept, for a parse after the first: only
+  /// the commands the parse reaches are restored, as in commander.
+  public virtual restoreStateBeforeParse(): void {
+    const saved = savedState
+    if (saved == null) return
+    cmdName = saved.name
+    scriptPath = null
+    scriptFile = null
+    rawArgs = []
+    optionValues = copyMap(saved.values)
+    optionValueSources = copyMap(saved.sources)
+    args = []
+    processedArgs = new Values()
+  }
+
+  private prepareForParse(): void {
+    if (savedState == null) {
+      saveStateBeforeParse()
+    } else {
+      restoreStateBeforeParse()
+    }
   }
 
   /// Splits `argv` into operands and unknown options, setting the values of the options it
@@ -922,7 +1032,8 @@ export class Command {
   private helpText(error: bool): string {
     const helper = createHelp()
     const getWidth = if (error) output.getErrHelpWidth else output.getOutHelpWidth
-    const text = helper.formatHelp(this, getWidth())
+    helper.prepareContext({ error, helpWidth: getWidth(), outputHasColors: hasColors(error) })
+    const text = helper.formatHelp(this, helper)
     const strip = output.stripColor
     return if (hasColors(error)) text else strip(text)
   }
@@ -1100,9 +1211,29 @@ export class Command {
     }
   }
 
-  private prepareUserArgs(argv: string[]?): string[] {
+  private prepareUserArgs(argv: string[]?, parseOptions: ParseOptions?): string[] {
+    const given = argv ?? processArgs
+    rawArgs = given.slice(0)
+    let userArgs = given.slice(0)
+    let scriptPath: string? = null
+    let scriptFile: string? = null
+    const from = parseOptions?.from ?? "user"
+    if (argv == null) {
+      // The program's own arguments: it's named after its executable (or, run by the
+      // interpreter, its entry file), as commander names a program after its script.
+      if (argv0 != "") scriptPath = argv0
+      scriptFile = execPath()
+    } else if (from == "node") {
+      if (given.length > 1) scriptPath = given[1]
+      userArgs = given.slice(2)
+    } else if (from == "electron") {
+      userArgs = given.slice(1)
+    }
+    this.scriptPath = scriptPath
+    this.scriptFile = scriptFile ?? scriptPath
+    if (cmdName == "" && scriptPath != null) nameFromFilename(scriptPath)
     if (cmdName == "") cmdName = "program"
-    return (argv ?? processArgs).slice(0)
+    return userArgs
   }
 
   private maybeOption(arg: string): bool {
@@ -1261,18 +1392,79 @@ export class Command {
     if (sub == null) {
       showHelp(true)
     }
+    const next: Command = sub
+    next.prepareForParse()
     const chain = commandAndAncestors()
-    for (let i = chain.length - 1; i >= 0; i--) chain[i].addHooks("preSubcommand", sub, runner)
-    sub.parseCommand(operands, unknown, runner)
+    for (let i = chain.length - 1; i >= 0; i--) chain[i].addHooks("preSubcommand", next, runner)
+    // With `parseAsync` the subcommand is parsed after its hooks have finished, so they can
+    // change it (as commander's promise chain does).
+    if (next.executableHandler) {
+      const run = () => executeSubCommand(next, operands.concat(unknown))
+      if (runner.deferred) {
+        runner.add(new Step(null, run))
+      } else {
+        // As commander's spawn: the program goes on, and exits when the subcommand does.
+        run().catch((e) => {
+          eprintln(`Error: ${e.message}`)
+          exit(1)
+        });
+      }
+      return
+    }
+    runner.add(new Step(() => next.parseCommand(operands, unknown, runner), null))
   }
 
   private dispatchHelpCommand(name: string?, runner: Runner): void throws Error {
     if (name == null) help()
     const sub = findCommand(name)
-    if (sub != null) sub.help()
+    if (sub != null && !sub.executableHandler) sub.help()
     // An unknown name: the help flag goes to the subcommand dispatch, which shows this help as an error.
     const ho = getHelpOption()
     dispatchSubcommand(name, [], [ho?.long ?? ho?.short ?? "--help"], runner)
+  }
+
+  /// Runs an executable subcommand (commander's `_executeSubCommand`) and exits with its exit
+  /// code (`exitOverride` gets a `commander.executeSubCommandAsync` error, code 0 too).
+  private async executeSubCommand(sub: Command, args: string[]): Promise<void> throws Error {
+    checkForMissingMandatoryOptions()
+    checkForConflictingOptions()
+    let file = sub.executableFileName ?? `${cmdName}-${sub.cmdName}`
+    let dir = executableDirPath ?? ""
+    const script = scriptPath
+    const scriptReal = scriptFile
+    if (scriptReal != null) dir = resolve(dirname(scriptReal), dir)
+    if (dir != "") {
+      let local = await findFile(dir, file)
+      // The legacy name: the script's instead of the program's.
+      if (local == null && sub.executableFileName == null && script != null) {
+        const legacy = basename(script, extname(script))
+        if (legacy != cmdName) local = await findFile(dir, `${legacy}-${sub.cmdName}`)
+      }
+      file = local ?? file
+    }
+    let code = 1
+    let message = "(close)"
+    try {
+      const status = await new Process(file, args).status()
+      code = status.code
+    } catch (e: ProcessError) {
+      if (e.kind == "NotFound") throw new Error(missingExecutable(file, dir, sub.cmdName))
+      if (e.kind == "PermissionDenied") throw new Error(`'${file}' not executable`)
+      message = "(error)"
+    }
+    exitWith(code, "commander.executeSubCommandAsync", message)
+  }
+
+  private missingExecutable(file: string, dir: string, name: string): string {
+    const searched = if (dir != "") {
+      `searched for local subcommand relative to directory '${dir}'`
+    } else {
+      "no directory for search for local subcommand, use .executableDir() to supply a custom directory"
+    }
+    return `'${file}' does not exist
+ - if '${name}' is not meant to be an executable command, remove description parameter from '.command()' and use '.description()' instead
+ - if the default executable name is not suitable, use the executableFile option to supply a custom name or path
+ - ${searched}`
   }
 
   private outputHelpIfRequested(argv: string[]): void throws Error {
@@ -1503,4 +1695,17 @@ export function createOption(flags: string, description: string = ""): Option {
 /// A new argument (as `new Argument(name, description)`).
 export function createArgument(name: string, description: string = ""): Argument {
   return new Argument(name, description)
+}
+
+/// `name` in `dir` (or with `.exe`), if there's a file of that name.
+async function findFile(dir: string, name: string): Promise<string?> {
+  const path = resolve(dir, name)
+  for (const candidate of [path, `${path}.exe`]) {
+    try {
+      const info = await stat(candidate)
+      if (info.isFile) return candidate
+    } catch (_e) {
+    }
+  }
+  return null
 }

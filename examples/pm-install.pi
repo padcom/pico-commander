@@ -1,0 +1,17 @@
+// The `install` subcommand of examples/pm.pi: a program of its own.
+import { program } from "../index"
+
+program
+  .name("pm-install")
+  .argument("[package-names...]")
+  .option("-f, --force", "force installation")
+  .action((args, opts, _cmd) => {
+    const names = args.strings("package-names")
+    if (names.length == 0) {
+      println("installing nothing")
+      return
+    }
+    println(`installing ${names.join(", ")}${if (opts.bool("force")) " (forced)" else ""}`)
+  })
+
+program.parse()

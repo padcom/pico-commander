@@ -3,11 +3,11 @@
 export { Argument, humanReadableArgName } from "./argument"
 export {
   ActionHandler, AddHelpTextContext, AsyncActionHandler, AsyncHook, Command, CommandOptions, ErrorOptions, ExitCallback, HelpContext, Hook, OutputConfiguration,
-  ParseOptionsResult,
+  ParseOptions, ParseOptionsResult,
   createArgument, createCommand, createOption,
 } from "./command"
 export { CommanderError, InvalidArgumentError } from "./errors"
-export { Help, HelpConfiguration, stripColor } from "./help"
+export { Help, HelpConfiguration, HelpContextOptions, stripColor } from "./help"
 export { Option } from "./option"
 export { Default, Parser, Value, Values, collect, increase, jsonValue, parseInteger, parseNumber, textValue, truthy } from "./value"
 export { program } from "./program"

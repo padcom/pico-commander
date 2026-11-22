@@ -5,7 +5,7 @@ subcommands and generated help for command-line programs. It follows commander 1
 it, and the same parsing, error messages, exit codes and help layout (checked against commander.js 14.0.3 on the same
 programs). It is plain Pico, with no native code, so it runs on every platform Pico does.
 
-It needs Pico 0.7.0 or later (async lambdas, enum methods, `int.parse`, terminal width and colours).
+It needs Pico 0.8.0 or later (`argv0` and `execPath()` for the program's name and executable subcommands).
 
 ## Use
 
@@ -120,6 +120,21 @@ program.addCommand(new Command("build").argument("<files...>"))
 program.addArgument(new Argument("[mode]", "how").choices(["fast", "slow"]).default("fast"))
 ```
 
+**Executable subcommands**, as commander's: with a description, `command` adds a subcommand that is a program of its
+own (and returns the parent, for adding more):
+
+```ts
+program
+  .command("install [package-names...]", "install one or more packages")   // runs pm-install
+  .command("search [query]", "search with a query", { executableFile: "pm-find" })
+program.parse()
+```
+
+`pm install a b` runs `pm-install a b` from the program's directory (`executableDir(dir)` makes that relative to it), or
+else from `PATH`, with this program's stdin, stdout and stderr, and exits with its exit code; `pm help install` runs
+`pm-install --help`. With `exitOverride()` the end is a `CommanderError` (`commander.executeSubCommandAsync`, the exit
+code), from `parseAsync` too. See examples/pm.pi.
+
 A missing required argument, too many arguments (unless `allowExcessArguments()`), an unknown option (unless
 `allowUnknownOption()`) and an unknown command are errors, with "(Did you mean …?)" for close misspellings.
 `enablePositionalOptions()` and `passThroughOptions()` work as in commander.
@@ -137,7 +152,15 @@ await program.parseAsync()
 
 `parse()` runs actions and hooks as it goes. `action` and `hook` also take an async function or lambda (one that
 returns a `Promise`); those need `parseAsync()`, which validates the whole command line and then runs the hooks and
-actions in order, each awaited. (`actionAsync`/`hookAsync` are the same, for 0.1 programs.)
+actions in order, each awaited; a subcommand is parsed after its `preSubcommand` hooks have finished, so they can change
+it. (`actionAsync`/`hookAsync` are the same, for 0.1 programs.)
+
+**What `parse` reads**: with no arguments, the program's (`args` in `std/process`), and the program is named after its
+executable (`nameFromFilename(argv0)`; under `pico run --interp`, its entry file) unless it has a name. An array is the
+arguments alone, unless `{ from: "node" }` (a runtime and a script first: `["node", "app.js", …]`, the script names the
+program) or `{ from: "electron" }` (an app first) says otherwise. `rawArgs` keeps what `parse` got, and a command can be
+parsed again: each parse starts from the option values it had before the first (`saveStateBeforeParse`,
+`restoreStateBeforeParse`).
 
 ## Help, version, errors and output
 
@@ -178,7 +201,8 @@ Columns line up by the text's width without colour codes, and the codes are remo
 `NO_COLOR`, `FORCE_COLOR` and `CLICOLOR_FORCE` decide, else whether it's a terminal (`getOutHasColors` overrides).
 
 `Help`'s methods are virtual (except the generic `groupItems`): override `createHelp()` in a `Command` subclass for a
-layout of your own.
+layout of your own. As in commander 14, `prepareContext({ error, helpWidth, outputHasColors })` is called first, then
+`formatHelp(cmd, helper)`.
 
 ## Differences from commander.js
 
@@ -187,12 +211,13 @@ Most come from Pico being statically typed, with no `any` or `undefined`:
 - **Values are typed**: see [Values](#values). Options are read with `opts().string("x")` and friends, not as
   properties (there is no `storeOptionsAsProperties`).
 - **The action gets `(args, opts, cmd)`**: the arguments as one `Values`, not spread.
-- **Async**: with `parseAsync`, hooks and actions run after the whole command line is checked, so a `preSubcommand`
-  hook can't change how the subcommand is parsed.
+- **`parse(array)` reads the arguments alone** by default (commander's default is `from: "node"`): a Pico program's
+  arguments don't start with a runtime.
 - **Mistakes in the program panic**: duplicate flags, a variadic argument that isn't last, an unknown hook event.
   Commander throws a plain `Error` for these.
-- **Not ported**: stand-alone executable subcommands (`command(name, description)` that runs `prog-name`),
-  `storeOptionsAsProperties`, `nameFromFilename`/`executableDir`, and the `from: "node" | "electron"` parse options.
+- **Executable subcommands** are programs (not `.js` files run with node), found as `name` or `name.exe`; signals
+  aren't forwarded to them.
+- **Not ported**: `storeOptionsAsProperties`.
 
 ## Develop
 
@@ -200,6 +225,7 @@ Most come from Pico being statically typed, with no `any` or `undefined`:
 pico fmt --check . && pico lint . && pico test .
 pico run examples/string-util.pi -- --help
 pico run examples/pizza.pi -- -p hawaiian -c blue -vv
+pico build examples/pm.pi -o bin/pm && pico build examples/pm-install.pi -o bin/pm-install && bin/pm install a
 ```
 
 ## License
