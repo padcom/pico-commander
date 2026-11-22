@@ -12,11 +12,3 @@ export function imax(a: int, b: int): int {
 export function compareStrings(a: string, b: string): int {
   return if (a < b) -1 else if (a > b) 1 else 0
 }
-
-/// Compares strings as JavaScript's `localeCompare` does for plain ASCII names: ignoring case
-/// first, then lower case before upper case.
-export function localeCompare(a: string, b: string): int {
-  const byLetters = compareStrings(a.toLowerCase(), b.toLowerCase())
-  if (byLetters != 0) return byLetters
-  return -compareStrings(a, b)
-}

@@ -1,6 +1,6 @@
 // Arguments, subcommands, actions, hooks and the async parse.
 import { describe, it, expect } from "std/test"
-import { Argument, Command, CommanderError, Value, Values, parseInteger } from "./index"
+import { Argument, Command, CommanderError, Value, Values, parseInteger, parseNumber } from "./index"
 
 class Probe {
   public out: string = ""
@@ -253,5 +253,59 @@ describe("commander's overloaded methods", () => {
     p.program.name("t").showHelpAfterError()
     expect(p.fails(["--nope"])).toBe("commander.unknownOption")
     expect(p.err).toBe("error: unknown option '--nope'\n\nUsage: t [options]\n\nOptions:\n  -h, --help  display help for command\n")
+  })
+})
+
+const lambdaLog: string[] = []
+
+async function asyncLambdas(): Promise<void> throws Error {
+  const p = new Probe()
+  p.program.argument("<x>")
+    .hook("preAction", async (_t, _a) => {
+      await Promise.resolve(0)
+      lambdaLog.push("hook")
+    })
+    .action(async (args, _opts, _cmd) => {
+      await Promise.resolve(0)
+      lambdaLog.push(`action ${args.string("x") ?? ""}`)
+    })
+  await p.program.parseAsync(["go"])
+  expect(lambdaLog).toEqual(["hook", "action go"])
+}
+
+describe("0.2", () => {
+  it("action and hook take async lambdas, as in commander", asyncLambdas)
+
+  it("a sync lambda still takes the sync action", () => {
+    const p = new Probe()
+    let ran = false
+    p.program.action((_a, _o, _c) => { ran = true })
+    p.program.parse([])
+    expect(ran).toBe(true)
+  })
+
+  it("values have json() and text()", () => {
+    expect(Value.List(["a", "b"]).json()).toBe("[\"a\",\"b\"]")
+    expect(Value.List(["a", "b"]).text()).toBe("a,b")
+    expect(Value.Str("x\"y").json()).toBe("\"x\\\"y\"")
+    expect(Value.Int(3).text()).toBe("3")
+  })
+
+  it("addHelpText takes a function of the context", () => {
+    const p = new Probe()
+    p.program.name("t").addHelpText("after", (ctx) => `after ${ctx.command.name()} ${ctx.error}`)
+      .addHelpText("before", (_ctx) => "")
+    p.program.outputHelp()
+    expect(p.out).toBe("Usage: t [options]\n\nOptions:\n  -h, --help  display help for command\nafter t false\n")
+    p.program.outputHelp({ error: true })
+    expect(p.err.endsWith("after t true\n")).toBe(true)
+  })
+
+  it("number parsers accept what number.parse does", () => {
+    const p = new Probe()
+    p.program.option("-x <x>", "", parseNumber).option("-n <n>", "", parseInteger)
+    p.program.parse(["-x", ".5", "-n", "+7"])
+    expect(p.program.opts().number("x") ?? 0.0).toBe(0.5)
+    expect(p.program.opts().int("n") ?? 0).toBe(7)
   })
 })

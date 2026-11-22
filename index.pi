@@ -2,12 +2,12 @@
 // help, with the same API wherever the language allows it (README.md lists the differences).
 export { Argument, humanReadableArgName } from "./argument"
 export {
-  ActionHandler, AsyncActionHandler, AsyncHook, Command, CommandOptions, ErrorOptions, ExitCallback, HelpContext, Hook, OutputConfiguration,
+  ActionHandler, AddHelpTextContext, AsyncActionHandler, AsyncHook, Command, CommandOptions, ErrorOptions, ExitCallback, HelpContext, Hook, OutputConfiguration,
   ParseOptionsResult,
   createArgument, createCommand, createOption,
 } from "./command"
 export { CommanderError, InvalidArgumentError } from "./errors"
-export { Help, HelpConfiguration } from "./help"
+export { Help, HelpConfiguration, stripColor } from "./help"
 export { Option } from "./option"
 export { Default, Parser, Value, Values, collect, increase, jsonValue, parseInteger, parseNumber, textValue, truthy } from "./value"
 export { program } from "./program"

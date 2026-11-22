@@ -5,7 +5,7 @@ subcommands and generated help for command-line programs. It follows commander 1
 it, and the same parsing, error messages, exit codes and help layout (checked against commander.js 14.0.3 on the same
 programs). It is plain Pico, with no native code, so it runs on every platform Pico does.
 
-It needs Pico 0.6.0 or later (method overloading).
+It needs Pico 0.7.0 or later (async lambdas, enum methods, `int.parse`, terminal width and colours).
 
 ## Use
 
@@ -89,6 +89,8 @@ them back by name, or by position (an action's arguments: `args.string(0)`):
 | `int(name)`, `number(name)` | an `Int`/`Num`, or a string that is one; else `null` |
 | `get(name)`, `has(name)`, `keys()`, `length` | the `Value?` itself |
 
+A `Value` prints as JSON with `v.json()` (`"a"`, `1`, `["x"]`) and as commander shows it in help with `v.text()`.
+
 Defaults, presets and implied values can be given as `bool`, `string`, `int`, `number` or a `Value`
 (`Value.List(["a"])`). A parser is `(value: string, previous: Value?) => Value throws Error`; throw
 `InvalidArgumentError` to reject the text, and commander's message says what was wrong:
@@ -128,34 +130,55 @@ A missing required argument, too many arguments (unless `allowExcessArguments()`
 program.hook("preAction", (thisCommand, actionCommand) => { … })   // also postAction, preSubcommand
 
 async function deploy(args: Values, opts: Values, cmd: Command): Promise<void> throws Error { … }
-program.command("deploy <env>").actionAsync(deploy)
+program.command("deploy <env>").action(deploy)
+program.command("wait").action(async (args, opts, cmd) => { await sleep(100) })
 await program.parseAsync()
 ```
 
-`parse()` runs actions and hooks as it goes; an async one needs `actionAsync`/`hookAsync` and `parseAsync()`, which
-validates the whole command line and then runs them in order, each awaited.
+`parse()` runs actions and hooks as it goes. `action` and `hook` also take an async function or lambda (one that
+returns a `Promise`); those need `parseAsync()`, which validates the whole command line and then runs the hooks and
+actions in order, each awaited. (`actionAsync`/`hookAsync` are the same, for 0.1 programs.)
 
 ## Help, version, errors and output
 
 `version(v, flags?, description?)`, `helpOption(flags, description)` (`helpOption(false)` turns it off),
 `helpCommand(nameAndArgs, description)` (`helpCommand(false)`, or `true` to add it without subcommands),
-`addHelpText("beforeAll" | "before" | "after" | "afterAll", text)`, `usage(text)`, `summary(text)`,
+`addHelpText("beforeAll" | "before" | "after" | "afterAll", text)` (or a function of `{ error, command }` giving the
+text), `usage(text)`, `summary(text)`,
 `showHelpAfterError()` or `showHelpAfterError(message)`, `showSuggestionAfterError(false)`, `configureHelp({ helpWidth,
-sortOptions, sortSubcommands, showGlobalOptions })`, `help()`, `outputHelp()`, `helpInformation()` (each also with
+sortOptions, sortSubcommands, showGlobalOptions, style… })`, `help()`, `outputHelp()`, `helpInformation()` (each also with
 `{ error: true }`), and `error(message)` or `error(message, { exitCode, code })` for errors of your own. `name()`,
 `description()`, `summary()`, `usage()`, `alias()`, `aliases()` and `version()` without an argument read the value back.
 
 By default errors and help-on-error go to stderr and end the program (exit code 1; 0 for `--help` and `--version`).
 `exitOverride()` throws a `CommanderError` (with commander's `code`, such as `commander.unknownOption`, and the
 `exitCode`) instead; `exitOverride(fn)` calls `fn` with it first. `configureOutput({ writeOut, writeErr, outputError,
-getOutHelpWidth, getErrHelpWidth })` sends the output elsewhere; tests use both:
+getOutHelpWidth, getErrHelpWidth, getOutHasColors, getErrHasColors, stripColor })` sends the output elsewhere; tests
+use both:
 
 ```ts
 let err = ""
 program.exitOverride().configureOutput({ writeErr: (s: string) => { err += s } })
 ```
 
-`Help`'s methods are virtual: override `createHelp()` in a `Command` subclass for a layout of your own.
+The help is as wide as the terminal (80 columns when it isn't one).
+
+**Groups**, as in commander 14: `optionsGroup("Network:")` and `commandsGroup("Main:")` put the options and commands
+added after them under that heading; `helpGroup(heading)` on an `Option` or a `Command` sets one item's (and on a
+`Command` with no argument, the group it's listed in). `helpOption` and `helpCommand` join the current group.
+
+**Styles**: `configureHelp({ styleTitle, styleUsage, styleOptionTerm, styleSubcommandTerm, styleArgumentTerm,
+styleCommandDescription, styleDescriptionText, … })` take a function of the text, for colours:
+
+```ts
+program.configureHelp({ styleTitle: (s: string) => `\u{1b}[1m${s}\u{1b}[22m` })
+```
+
+Columns line up by the text's width without colour codes, and the codes are removed when the output has no colours:
+`NO_COLOR`, `FORCE_COLOR` and `CLICOLOR_FORCE` decide, else whether it's a terminal (`getOutHasColors` overrides).
+
+`Help`'s methods are virtual (except the generic `groupItems`): override `createHelp()` in a `Command` subclass for a
+layout of your own.
 
 ## Differences from commander.js
 
@@ -164,15 +187,11 @@ Most come from Pico being statically typed, with no `any` or `undefined`:
 - **Values are typed**: see [Values](#values). Options are read with `opts().string("x")` and friends, not as
   properties (there is no `storeOptionsAsProperties`).
 - **The action gets `(args, opts, cmd)`**: the arguments as one `Values`, not spread.
-- **Async uses its own methods**: `actionAsync`, `hookAsync`. Pico has no async lambdas yet, so they take named
-  `async function`s, and a lambda can't tell a sync overload from an async one. With `parseAsync`, hooks and actions run
-  after the whole command line is checked, so a `preSubcommand` hook can't change how the subcommand is parsed.
+- **Async**: with `parseAsync`, hooks and actions run after the whole command line is checked, so a `preSubcommand`
+  hook can't change how the subcommand is parsed.
 - **Mistakes in the program panic**: duplicate flags, a variadic argument that isn't last, an unknown hook event.
   Commander throws a plain `Error` for these.
-- **Help width** defaults to 80 (Pico can't ask the terminal for its width yet); set it with `configureHelp` or
-  `configureOutput`.
-- **Not ported**: stand-alone executable subcommands (`command(name, description)` that runs `prog-name`), the help
-  groups (`helpGroup`, `optionsGroup`), help styling (`styleTitle` …), `addHelpText` with a function,
+- **Not ported**: stand-alone executable subcommands (`command(name, description)` that runs `prog-name`),
   `storeOptionsAsProperties`, `nameFromFilename`/`executableDir`, and the `from: "node" | "electron"` parse options.
 
 ## Develop

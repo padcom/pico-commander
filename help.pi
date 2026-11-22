@@ -4,8 +4,8 @@
 import { Argument, humanReadableArgName } from "./argument"
 import { Command } from "./command"
 import { Option } from "./option"
-import { imax, localeCompare } from "./util"
-import { Value, jsonValue } from "./value"
+import { imax } from "./util"
+import { Value } from "./value"
 
 /// The settings `Command.configureHelp` takes.
 export struct HelpConfiguration {
@@ -15,6 +15,23 @@ export struct HelpConfiguration {
   sortOptions?: bool
   /// Also lists the options of the parent commands, under "Global Options:".
   showGlobalOptions?: bool
+  /// Styling (commander 14): what each part of the help looks like, such as
+  /// `styleTitle: (str) => `\x1b[1m${str}\x1b[22m``. Colours are removed when the output
+  /// has none (see `OutputConfiguration.getOutHasColors`).
+  styleTitle?: (str: string) => string
+  styleUsage?: (str: string) => string
+  styleCommandText?: (str: string) => string
+  styleCommandDescription?: (str: string) => string
+  styleDescriptionText?: (str: string) => string
+  styleOptionTerm?: (str: string) => string
+  styleSubcommandTerm?: (str: string) => string
+  styleArgumentTerm?: (str: string) => string
+  styleOptionText?: (str: string) => string
+  styleArgumentText?: (str: string) => string
+  styleSubcommandText?: (str: string) => string
+  styleOptionDescription?: (str: string) => string
+  styleSubcommandDescription?: (str: string) => string
+  styleArgumentDescription?: (str: string) => string
 }
 
 export class Help {
@@ -24,8 +41,10 @@ export class Help {
   public showGlobalOptions: bool = false
   /// Descriptions narrower than this aren't wrapped.
   public minWidthToWrap: int = 40
+  private config: HelpConfiguration? = null
 
   constructor(config: HelpConfiguration? = null) {
+    this.config = config
     if (config != null) {
       this.helpWidth = config.helpWidth
       this.sortSubcommands = config.sortSubcommands ?? false
@@ -34,18 +53,123 @@ export class Help {
     }
   }
 
+  // ---- styling (commander 14): each returns `str` unless configured or overridden
+
+  private styled(f: ((str: string) => string)?, str: string): string {
+    return if (f != null) f(str) else str
+  }
+
+  public virtual styleTitle(str: string): string {
+    return styled(config?.styleTitle, str)
+  }
+
+  /// The usage line, word by word: `[options]`, `[command]`, arguments, the command's words.
+  public virtual styleUsage(str: string): string {
+    const f = config?.styleUsage
+    if (f != null) return f(str)
+    return str.split(" ").map((word: string) => {
+      if (word == "[options]") return styleOptionText(word)
+      if (word == "[command]") return styleSubcommandText(word)
+      if (word.startsWith("[") || word.startsWith("<")) return styleArgumentText(word)
+      return styleCommandText(word)
+    }).join(" ")
+  }
+
+  public virtual styleCommandDescription(str: string): string {
+    const f = config?.styleCommandDescription
+    return if (f != null) f(str) else styleDescriptionText(str)
+  }
+
+  public virtual styleOptionDescription(str: string): string {
+    const f = config?.styleOptionDescription
+    return if (f != null) f(str) else styleDescriptionText(str)
+  }
+
+  public virtual styleSubcommandDescription(str: string): string {
+    const f = config?.styleSubcommandDescription
+    return if (f != null) f(str) else styleDescriptionText(str)
+  }
+
+  public virtual styleArgumentDescription(str: string): string {
+    const f = config?.styleArgumentDescription
+    return if (f != null) f(str) else styleDescriptionText(str)
+  }
+
+  public virtual styleDescriptionText(str: string): string {
+    return styled(config?.styleDescriptionText, str)
+  }
+
+  public virtual styleOptionTerm(str: string): string {
+    const f = config?.styleOptionTerm
+    return if (f != null) f(str) else styleOptionText(str)
+  }
+
+  /// A subcommand's term, word by word: `[options]`, arguments, the subcommand's words.
+  public virtual styleSubcommandTerm(str: string): string {
+    const f = config?.styleSubcommandTerm
+    if (f != null) return f(str)
+    return str.split(" ").map((word: string) => {
+      if (word == "[options]") return styleOptionText(word)
+      if (word.startsWith("[") || word.startsWith("<")) return styleArgumentText(word)
+      return styleSubcommandText(word)
+    }).join(" ")
+  }
+
+  public virtual styleArgumentTerm(str: string): string {
+    const f = config?.styleArgumentTerm
+    return if (f != null) f(str) else styleArgumentText(str)
+  }
+
+  public virtual styleOptionText(str: string): string {
+    return styled(config?.styleOptionText, str)
+  }
+
+  public virtual styleArgumentText(str: string): string {
+    return styled(config?.styleArgumentText, str)
+  }
+
+  public virtual styleSubcommandText(str: string): string {
+    return styled(config?.styleSubcommandText, str)
+  }
+
+  public virtual styleCommandText(str: string): string {
+    return styled(config?.styleCommandText, str)
+  }
+
+  /// How wide `str` shows: without its ANSI colour codes.
+  public virtual displayWidth(str: string): int {
+    return stripColor(str).length
+  }
+
+  /// The items in groups (commander 14's `groupItems`): the groups in the order they first
+  /// appear in `all` (the command's own, hidden ones too), then in `visible`; each with its
+  /// visible items in order. Not virtual: pico's generic methods can't be (E0358).
+  public groupItems<T>(all: T[], visible: T[], groupOf: (item: T) => string): [string, T[]][] {
+    const out: [string, T[]][] = []
+    const find = (g: string): int => {
+      for (let i = 0; i < out.length; i++) {
+        if (out[i][0] == g) return i
+      }
+      out.push([g, []])
+      return out.length - 1
+    }
+    for (const item of all) find(groupOf(item))
+    for (const item of visible) out[find(groupOf(item))][1].push(item)
+    return out
+  }
+
   /// The subcommands help lists, with the help command.
   public virtual visibleCommands(cmd: Command): Command[] {
     const out = cmd.commands.filter((c: Command) => !c.isHidden())
     const helpCommand = cmd.getHelpCommand()
     if (helpCommand != null && !helpCommand.isHidden()) out.push(helpCommand)
-    if (sortSubcommands) out.sort((a: Command, b: Command) => localeCompare(a.name(), b.name()))
+    if (sortSubcommands) out.sort((a: Command, b: Command) => a.name().localeCompare(b.name()))
     return out
   }
 
   /// Orders options by their short flag, else their long one (without dashes).
   public virtual compareOptions(a: Option, b: Option): int {
-    return localeCompare(sortKey(a), sortKey(b))
+    return sortKey(a).localeCompare(sortKey(b))
   }
 
   /// The options help lists, with the help option unless another option took its flags.
@@ -110,25 +234,25 @@ export class Help {
 
   public virtual longestSubcommandTermLength(cmd: Command): int {
     let n = 0
-    for (const c of visibleCommands(cmd)) n = imax(n, subcommandTerm(c).length)
+    for (const c of visibleCommands(cmd)) n = imax(n, displayWidth(styleSubcommandTerm(subcommandTerm(c))))
     return n
   }
 
   public virtual longestOptionTermLength(cmd: Command): int {
     let n = 0
-    for (const o of visibleOptions(cmd)) n = imax(n, optionTerm(o).length)
+    for (const o of visibleOptions(cmd)) n = imax(n, displayWidth(styleOptionTerm(optionTerm(o))))
     return n
   }
 
   public virtual longestGlobalOptionTermLength(cmd: Command): int {
     let n = 0
-    for (const o of visibleGlobalOptions(cmd)) n = imax(n, optionTerm(o).length)
+    for (const o of visibleGlobalOptions(cmd)) n = imax(n, displayWidth(styleOptionTerm(optionTerm(o))))
     return n
   }
 
   public virtual longestArgumentTermLength(cmd: Command): int {
     let n = 0
-    for (const a of visibleArguments(cmd)) n = imax(n, argumentTerm(a).length)
+    for (const a of visibleArguments(cmd)) n = imax(n, displayWidth(styleArgumentTerm(argumentTerm(a))))
     return n
   }
 
@@ -164,10 +288,10 @@ export class Help {
     const def = option.defaultValue
     if (def != null) {
       const showDefault = option.required || option.optional || (option.isBoolean() && def is Value.Bool(_))
-      if (showDefault) extra.push(`default: ${option.defaultValueDescription ?? jsonValue(def)}`)
+      if (showDefault) extra.push(`default: ${option.defaultValueDescription ?? def.json()}`)
     }
     const preset = option.presetArg
-    if (preset != null && option.optional) extra.push(`preset: ${jsonValue(preset)}`)
+    if (preset != null && option.optional) extra.push(`preset: ${preset.json()}`)
     const envVar = option.envVar
     if (envVar != null) extra.push(`env: ${envVar}`)
     if (extra.length > 0) return `${option.description} (${extra.join(", ")})`
@@ -180,7 +304,7 @@ export class Help {
     const choices = argument.argChoices
     if (choices != null) extra.push(`choices: ${choices.map((c: string) => JSON.stringify(c)).join(", ")}`)
     const def = argument.defaultValue
-    if (def != null) extra.push(`default: ${argument.defaultValueDescription ?? jsonValue(def)}`)
+    if (def != null) extra.push(`default: ${argument.defaultValueDescription ?? def.json()}`)
     if (extra.length > 0) {
       const extraDescription = `(${extra.join(", ")})`
       if (argument.description != "") return `${argument.description} ${extraDescription}`
@@ -210,13 +334,15 @@ export class Help {
     if (remainingWidth >= minWidthToWrap && !preformatted(description)) {
       formatted = boxWrap(description, remainingWidth).replaceAll("\n", "\n" + " ".repeat(termWidth + spacerWidth))
     }
-    return itemIndent + term.padEnd(termWidth, " ") + " ".repeat(spacerWidth) + formatted.replaceAll("\n", "\n" + itemIndent)
+    // (Padded by how wide the term shows: colour codes take no room.)
+    const padded = term + " ".repeat(imax(0, termWidth - displayWidth(term)))
+    return itemIndent + padded + " ".repeat(spacerWidth) + formatted.replaceAll("\n", "\n" + itemIndent)
   }
 
   /// A heading, its items and an empty line; nothing without items.
   public virtual formatItemList(heading: string, items: string[]): string[] {
     if (items.length == 0) return []
-    return [heading, ...items, ""]
+    return [styleTitle(heading), ...items, ""]
   }
 
   /// Wraps `str` at spaces to `width` columns, keeping its line breaks; a width below
@@ -231,13 +357,17 @@ export class Help {
         continue
       }
       let sum = chunks[0]
+      let sumWidth = displayWidth(sum)
       for (let i = 1; i < chunks.length; i++) {
         const chunk = chunks[i]
-        if (sum.length + chunk.length <= width) {
+        const w = displayWidth(chunk)
+        if (sumWidth + w <= width) {
           sum += chunk
+          sumWidth += w
         } else {
           wrapped.push(sum)
           sum = chunk.trimStart()
+          sumWidth = displayWidth(sum)
         }
       }
       wrapped.push(sum)
@@ -250,24 +380,57 @@ export class Help {
     if (helpWidth == null) helpWidth = width
     const termWidth = padWidth(cmd)
     const item = (term: string, description: string): string => formatItem(term, termWidth, description)
-    let output: string[] = [`Usage: ${commandUsage(cmd)}`, ""]
+    let output: string[] = [`${styleTitle("Usage:")} ${styleUsage(commandUsage(cmd))}`, ""]
     const description = commandDescription(cmd)
     if (description != "") {
-      output.push(boxWrap(description, helpWidth ?? 80))
+      output.push(boxWrap(styleCommandDescription(description), helpWidth ?? 80))
       output.push("")
     }
     output = output.concat(formatItemList("Arguments:",
-      visibleArguments(cmd).map((a: Argument) => item(argumentTerm(a), argumentDescription(a)))))
-    output = output.concat(formatItemList("Options:",
-      visibleOptions(cmd).map((o: Option) => item(optionTerm(o), optionDescription(o)))))
+      visibleArguments(cmd).map((a: Argument) => item(styleArgumentTerm(argumentTerm(a)), styleArgumentDescription(argumentDescription(a))))))
+    // Options and commands in their groups (commander 14's `helpGroup`), "Options:" and
+    // "Commands:" by default.
+    const optionGroups = groupItems(cmd.options, visibleOptions(cmd), (o: Option) => o.helpGroupHeading ?? "Options:")
+    for (const [heading, opts] of optionGroups) {
+      output = output.concat(formatItemList(heading,
+        opts.map((o: Option) => item(styleOptionTerm(optionTerm(o)), styleOptionDescription(optionDescription(o))))))
+    }
     if (showGlobalOptions) {
       output = output.concat(formatItemList("Global Options:",
-        visibleGlobalOptions(cmd).map((o: Option) => item(optionTerm(o), optionDescription(o)))))
+        visibleGlobalOptions(cmd).map((o: Option) => item(styleOptionTerm(optionTerm(o)), styleOptionDescription(optionDescription(o))))))
     }
-    output = output.concat(formatItemList("Commands:",
-      visibleCommands(cmd).map((c: Command) => item(subcommandTerm(c), subcommandDescription(c)))))
+    const commandGroups = groupItems(cmd.commands, visibleCommands(cmd), (c: Command) => {
+      const g = c.helpGroup()
+      return if (g != "") g else "Commands:"
+    })
+    for (const [heading, cmds] of commandGroups) {
+      output = output.concat(formatItemList(heading,
+        cmds.map((c: Command) => item(styleSubcommandTerm(subcommandTerm(c)), styleSubcommandDescription(subcommandDescription(c))))))
+    }
     return output.join("\n")
   }
+}
+
+/// `str` without ANSI colour codes (`ESC [ … m`), as commander's `stripColor`.
+export function stripColor(str: string): string {
+  if (!str.includes("\u{1b}")) return str
+  let out = ""
+  let i = 0
+  while (i < str.length) {
+    if (str[i] == '\u{1b}' && i + 1 < str.length && str[i + 1] == '[') {
+      let j = i + 2
+      while (j < str.length && ((str[j] >= '0' && str[j] <= '9') || str[j] == ';')) {
+        j += 1
+      }
+      if (j < str.length && str[j] == 'm') {
+        i = j + 1
+        continue
+      }
+    }
+    out += str[i].toString()
+    i += 1
+  }
+  return out
 }
 
 /// `line` as runs of whitespace each followed by a word (`"a  b"` is `"a"`, `"  b"`); trailing
