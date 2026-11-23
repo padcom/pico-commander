@@ -11,8 +11,16 @@ standard library's `std/text`, `std/term`, `wrap` and `hasColors()`, which it us
 
 ## Use
 
+Add it to `project.json` (the package is `padcom/pico-commander`; before 0.5.0 it was `padcom/commander`):
+
+```json
+"dependencies": {
+  "padcom/pico-commander": { "git": "https://github.com/padcom/pico-commander", "tag": "v0.5.0" }
+}
+```
+
 ```ts
-import { Command } from "padcom/commander"
+import { Command } from "padcom/pico-commander"
 
 const program = new Command()
 
